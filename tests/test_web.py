@@ -356,5 +356,7 @@ def test_settings_browse_root_relative_rejected(client: TestClient) -> None:
         "browse_root": "relative/path",
     }, follow_redirects=False)
     assert resp.status_code == 303
-    # Existing /media default should still be in the page (not overwritten)
-    assert "/media" in client.get("/settings").text
+    # Existing / default browse_root should still be in the page (not overwritten)
+    page = client.get("/settings").text
+    assert 'value="/"' in page or 'value="/media"' in page
+    assert "relative/path" not in page

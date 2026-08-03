@@ -33,7 +33,7 @@
   <label>名称：<input name="name" id="name_input" required placeholder="自动从路径填充"></label>
 
   <label>路径：
-    <input name="path" id="path_input" required placeholder="/media/movies" style="width:400px">
+    <input name="path" id="path_input" required placeholder="/movies 或 /Download" style="width:400px">
     <span id="browse_btn_area">
       <button type="button" id="browse_btn" onclick="openBrowser()">浏览...</button>
     </span>
@@ -80,9 +80,9 @@
   </div>
   <div id="browser_path" style="background:#f0f0f0; padding:8px; border-radius:4px; margin-bottom:8px; font-family:monospace;">/</div>
   <div id="browser_hint" style="background:#fffbe6; border:1px solid #f0c36d; padding:8px 10px; border-radius:4px; margin-bottom:8px; font-size:12px; line-height:1.6;">
-    📌 <b>只能看到挂载进容器的目录</b>。如果这里没有你想要的文件夹，请先编辑 <code>docker-compose.yml</code> 添加类似条目并重启：
+    📌 从容器根目录 <code>/</code> 开始浏览，选择你<b>挂载进来的媒体目录</b>。如果没看到想要的文件夹，说明还没挂载进容器——请编辑 <code>docker-compose.yml</code> 加一行并重启：
     <pre style="margin:6px 0 0; padding:6px 8px; background:#f7f7f7; border-radius:3px; font-size:12px;">volumes:
-  - /你的/电影/目录:/media/电影</pre>
+  - /宿主机/电影/目录:/movies</pre>
     然后点击下方“重新加载”刷新列表。
     <div style="margin-top:6px;">
       <button type="button" onclick="reloadBrowser()" style="font-size:12px; padding:2px 8px;">🔄 重新加载</button>

@@ -497,7 +497,7 @@ def create_app(
         subtitle_enabled = form.get("subtitle_enabled") == "on"
         os_api_key = str(form.get("opensubtitles_api_key", ""))
         subtitle_langs = str(form.get("subtitle_languages", "chi,zho,zh"))
-        browse_root = str(form.get("browse_root", "/media")).strip() or "/media"
+        browse_root = str(form.get("browse_root", "/")).strip() or "/"
 
         async with lock:
             runner: ScanRunner = request.app.state.runner
@@ -652,7 +652,7 @@ def create_app(
         try:
             if connection_type == "local":
                 config: AppConfig = request.app.state.config
-                browse_root = Path(config.browse_root or "/media")
+                browse_root = Path(config.browse_root or "/")
 
                 # Normalise & clamp under browse_root
                 requested = Path(path)

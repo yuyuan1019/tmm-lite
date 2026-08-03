@@ -94,7 +94,7 @@ class AppConfig:
     subtitle_enabled: bool = True
     opensubtitles_api_key: str = ""
     subtitle_languages: str = "chi,zho,zh"  # ISO 639-2, comma-separated
-    browse_root: str = "/media"  # local browse is clamped under this directory
+    browse_root: str = "/"  # local browse is clamped under this directory
     libraries_seed: list[LibrarySeed] = field(default_factory=list)
     _extra: dict[str, object] = field(default_factory=dict, repr=False)
 
@@ -135,7 +135,7 @@ _DEFAULTS: dict[str, object] = {
     "subtitle_enabled": True,
     "opensubtitles_api_key": "",
     "subtitle_languages": "chi,zho,zh",
-    "browse_root": "/media",
+    "browse_root": "/",
     "libraries": [],
 }
 

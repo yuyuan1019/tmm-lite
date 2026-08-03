@@ -59,11 +59,10 @@
     <legend>媒体库浏览根</legend>
     <label>
       本地浏览起点：
-      <input type="text" name="browse_root" value="{{ config.browse_root }}" style="width:300px" placeholder="/media">
+      <input type="text" name="browse_root" value="{{ config.browse_root }}" style="width:300px" placeholder="/">
     </label>
     <p><small>
-      “浏览...”按钮只会列出该目录下的子目录。Docker 部署时建议保持 <code>/media</code>，
-      并把宿主机上的电影/剧集目录挂载到该路径下。设为 <code>/</code> 会列出容器所有顶层目录（不建议）。
+      “浏览...”按钮只列出该目录及其子目录。默认 <code>/</code>（可从容器根目录浏览所有挂载点）。可改成更窄的路径（如 <code>/media</code>）以隐藏其他目录。
     </small></p>
   </fieldset>
 

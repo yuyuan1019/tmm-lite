@@ -10,6 +10,6 @@ services:
       # - PUID=1000              # 如实现了用户映射入口脚本再启用
     volumes:
       - ./data:/app/data                      # 配置 + 数据库
-      - /path/to/movies:/media/movies         # ← 改成你的电影目录
-      - /path/to/tvshows:/media/tvshows       # ← 改成你的剧集目录
+      - /path/to/movies:/movies               # ← 改成你的电影目录（任意挂载路径都行）
+      - /path/to/tvshows:/tvshows             # ← 改成你的剧集目录
     restart: unless-stopped
