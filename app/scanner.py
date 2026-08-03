@@ -67,17 +67,22 @@ ScrapeResult = ScrapedMeta | ExistingNfoMatched
 
 def contains_video(folder: Path) -> bool:
     """Check if *folder* contains at least one video file (max depth 2)."""
+    return find_video_file(folder) is not None
+
+
+def find_video_file(folder: Path) -> Path | None:
+    """Return the first video file found under *folder* (depth ≤2), or None."""
     try:
         for child in folder.iterdir():
             if child.is_file() and child.suffix.lower() in VIDEO_EXTENSIONS:
-                return True
+                return child
             if child.is_dir():
                 for sub in child.iterdir():
                     if sub.is_file() and sub.suffix.lower() in VIDEO_EXTENSIONS:
-                        return True
+                        return sub
     except OSError:
         pass
-    return False
+    return None
 
 
 def normalize_path(path: str) -> str:
@@ -516,10 +521,16 @@ class ScanRunner:
         # Step 7: Subtitle download (best-effort, after NFO)
         if self._config.subtitle_enabled and self._subtitle is not None:
             try:
+                video_file = find_video_file(target.folder_path)
+                video_filename = (
+                    video_file.relative_to(target.folder_path).as_posix()
+                    if video_file is not None else None
+                )
                 await self._subtitle.download(
                     title=target.parsed_title or meta.title,
                     year=meta.year,
                     media_folder=target.folder_path,
+                    video_filename=video_filename,
                 )
             except Exception:
                 logger.warning(

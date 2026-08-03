@@ -325,9 +325,13 @@ def create_app(
                 import json
 
                 from app.crypto import encrypt_str
+                try:
+                    port = int(conn_port) if conn_port.strip() else (22 if connection_type == "ssh" else 443)
+                except ValueError:
+                    return _redirect("/libraries", err="端口必须是数字")
                 cfg = {
                     "host": conn_host.strip(),
-                    "port": int(conn_port) if conn_port.strip() else (22 if connection_type == "ssh" else 443),
+                    "port": port,
                     "username": conn_username.strip(),
                     "password": conn_password,
                 }
@@ -715,19 +719,16 @@ def create_app(
                 }
 
             # Remote: create a temp connection
-            cfg = ConnectionConfig(
-                type=connection_type,
-                host=host,
-                port=int(port) if port else 0,
-                username=username,
-                password=password,
-            )
             if not host.strip():
                 return JSONResponse({"error": "请输入主机地址", "items": []}, status_code=400)
+            try:
+                browse_port = int(port) if port.strip() else 0
+            except ValueError:
+                return JSONResponse({"error": "端口必须是数字", "items": []}, status_code=400)
             cfg = ConnectionConfig(
                 type=connection_type,
                 host=host.strip(),
-                port=int(port) if port.strip() else 0,
+                port=browse_port,
                 username=username.strip(),
                 password=password,
             )
@@ -740,8 +741,8 @@ def create_app(
                     try:
                         if await conn.is_dir(full):
                             dirs_only.append({"name": name, "path": full})
-                    except Exception:
-                        pass
+                    except Exception as exc:  # noqa: BLE001 (browse is best-effort)
+                        logger.debug("Browse is_dir failed for %s: %s", full, exc)
                 dirs_only.sort(key=lambda d: d["name"].lower())
                 parent_path = str(PurePosixPath(path).parent)
                 parent = parent_path if parent_path and parent_path != "/" else None

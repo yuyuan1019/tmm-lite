@@ -135,7 +135,14 @@ class SubtitleDownloader:
             data = await self._subdl.download(result.download_url)
 
         # Determine filename: prefer matching the video file stem
-        stem = Path(video_filename).stem if video_filename else "subtitles"
+        if video_filename:
+            video_path = Path(video_filename)
+            stem = video_path.stem
+            dest_folder = folder / video_path.parent
+        else:
+            stem = "subtitles"
+            dest_folder = folder
+
         # Extract language code for suffix
         lang_code = result.language.split("-")[0].lower() if result.language else "zh"
         if lang_code in ("chi", "zho", "zh"):
@@ -145,7 +152,8 @@ class SubtitleDownloader:
         else:
             suffix = lang_code
 
-        dest = folder / f"{stem}.{suffix}.srt"
+        dest_folder.mkdir(parents=True, exist_ok=True)
+        dest = dest_folder / f"{stem}.{suffix}.srt"
         dest.write_bytes(data)
         logger.info("Subtitle saved: %s", dest)
         return dest
