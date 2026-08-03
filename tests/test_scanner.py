@@ -76,6 +76,7 @@ def _mock_tmdb() -> MagicMock:
     tmdb = MagicMock(spec=TmdbScraper)
     tmdb.search_and_fetch = AsyncMock()
     tmdb.download_image = AsyncMock()
+    tmdb.fetch_image = AsyncMock(return_value=b"\x89PNG\r\n")
     tmdb.aclose = AsyncMock()
     return tmdb
 
@@ -554,7 +555,7 @@ async def test_image_failure_item_failed(tmp_path: Path) -> None:
     runner = h.runner; tmdb = h.tmdb
 
     tmdb.search_and_fetch.return_value = _mock_meta(poster_url="https://x.com/p.jpg")
-    tmdb.download_image.side_effect = Exception("Download failed")
+    tmdb.fetch_image.side_effect = Exception("Download failed")
     with h.session() as sess:
         _add_library(sess,"Movies", str(movies_dir), "movie")
 
@@ -674,6 +675,7 @@ async def test_overwrite_matched_items(tmp_path: Path) -> None:
     new_tmdb = _mock_tmdb()
     new_tmdb.search_and_fetch.return_value = _mock_meta(title="New Title")
     new_tmdb.download_image = AsyncMock()
+    new_tmdb.fetch_image = AsyncMock(return_value=b"\x89PNG\r\n")
     runner.reconfigure(config2, new_tmdb, h.douban)
 
     await runner.run_full()
@@ -879,3 +881,225 @@ async def test_rescrape_with_existing_nfo(tmp_path: Path) -> None:
         await runner.rescrape_item(item.id)
 
     tmdb.search_and_fetch.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Remote library scanning (SSH/WebDAV via Connection abstraction)
+# ---------------------------------------------------------------------------
+
+class _FakeConnection:
+    """In-memory fake of the Connection interface for remote-library tests."""
+
+    def __init__(self, root: str, files: dict[str, bytes]) -> None:
+        self._root = root.rstrip("/")
+        self._files = dict(files)  # absolute path -> bytes
+        self.written: dict[str, bytes] = {}
+
+    def _abs(self, path: str) -> str:
+        from pathlib import PurePosixPath
+        p = path
+        if not p.startswith("/"):
+            p = str(PurePosixPath(self._root) / p)
+        return p
+
+    async def list_dir(self, path: str) -> list[str]:
+        base = self._abs(path)
+        names: set[str] = set()
+        for ap in list(self._files.keys()):
+            if ap.startswith(base + "/"):
+                rest = ap[len(base) + 1:]
+                top = rest.split("/", 1)[0]
+                names.add(top)
+        return sorted(names)
+
+    async def is_file(self, path: str) -> bool:
+        return self._abs(path) in self._files
+
+    async def is_dir(self, path: str) -> bool:
+        base = self._abs(path)
+        return any(ap.startswith(base + "/") for ap in self._files)
+
+    async def read_bytes(self, path: str) -> bytes:
+        return self._files[self._abs(path)]
+
+    async def write_bytes(self, path: str, data: bytes) -> None:
+        ap = self._abs(path)
+        self._files[ap] = data
+        self.written[ap] = data
+
+    async def mkdir(self, path: str, parents: bool = True) -> None:
+        pass
+
+    async def exists(self, path: str) -> bool:
+        ap = self._abs(path)
+        return ap in self._files or any(k.startswith(ap + "/") for k in self._files)
+
+    async def contains_video(self, folder: str) -> bool:
+        from pathlib import PurePosixPath
+
+        from app import VIDEO_EXTENSIONS
+
+        base = self._abs(folder)
+        for ap in list(self._files.keys()):
+            if (
+                PurePosixPath(ap).suffix.lower() in VIDEO_EXTENSIONS
+                and ap.startswith(base + "/")
+            ):
+                return True
+        return False
+
+    async def aclose(self) -> None:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_remote_library_scrapes_via_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A remote (ssh) library should scan & write metadata via its Connection."""
+    from app import scanner as scanner_mod
+    from app.crypto import encrypt_dict, load_or_create_key
+
+    enc_key = load_or_create_key(tmp_path)
+
+    # Fake remote filesystem: a remote root with one movie folder + video file
+    remote_root = "/nas/movies"
+    files: dict[str, bytes] = {
+        remote_root + "/Film (2020)/video.mkv": b"fake",
+    }
+    fake_conn = _FakeConnection(remote_root, files)
+
+    h = _setup(tmp_path)
+    runner = h.runner
+    tmdb = h.tmdb
+
+    # Inject enc_key so the runner can decrypt credentials
+    runner._enc_key = enc_key  # type: ignore[attr-defined]
+
+    tmdb.search_and_fetch.return_value = _mock_meta(title="Film", source_id="42")
+
+    creds = encrypt_dict(
+        {"host": "nas", "port": 22, "username": "u", "password": "p"}, enc_key,
+    )
+    with h.session() as sess:
+        lib = Library(
+            name="Remote Movies", path=remote_root, media_type="movie",
+            connection_type="ssh", connection_config_encrypted=creds,
+        )
+        sess.add(lib)
+        sess.commit()
+
+    # Patch connection creation to return our fake
+    monkeypatch.setattr(
+        scanner_mod, "_library_connection",
+        lambda lib, key: fake_conn,
+    )
+
+    log = await runner.run_full()
+
+    assert log.total == 1
+    assert log.matched == 1
+
+    # Metadata files should have been written through the fake connection
+    assert (remote_root + "/Film (2020)/movie.nfo") in fake_conn.written
+    assert (remote_root + "/Film (2020)/poster.jpg") in fake_conn.written
+    # The NFO must contain the matched title
+    assert b"Film" in fake_conn.written[remote_root + "/Film (2020)/movie.nfo"]
+
+
+# ---------------------------------------------------------------------------
+# Connection helpers
+# ---------------------------------------------------------------------------
+
+def test_library_connection_local_returns_local(tmp_path: Path) -> None:
+    from app.connection import LocalConnection
+    from app.scanner import _library_connection
+
+    lib = Library(name="L", path="/media/movies", media_type="movie")
+    conn = _library_connection(lib, b"irrelevant")
+    assert isinstance(conn, LocalConnection)
+
+
+def test_library_connection_remote_without_key_falls_back(tmp_path: Path) -> None:
+    from app.connection import LocalConnection
+    from app.scanner import _library_connection
+
+    lib = Library(
+        name="L", path="/nas/movies", media_type="movie",
+        connection_type="ssh", connection_config_encrypted="garbage",
+    )
+    # No enc_key → must fall back to LocalConnection, not crash
+    conn = _library_connection(lib, None)
+    assert isinstance(conn, LocalConnection)
+
+
+def test_library_connection_remote_with_encrypted_config_creates_webdav(
+    tmp_path: Path,
+) -> None:
+    from app.connection import WebdavConnection
+    from app.crypto import encrypt_dict, load_or_create_key
+    from app.scanner import _library_connection
+
+    enc_key = load_or_create_key(tmp_path)
+    creds = encrypt_dict(
+        {"host": "nas", "port": 443, "username": "u", "password": "p"}, enc_key,
+    )
+    lib = Library(
+        name="L", path="/webdav/movies", media_type="movie",
+        connection_type="webdav", connection_config_encrypted=creds,
+    )
+    conn = _library_connection(lib, enc_key)
+    assert isinstance(conn, WebdavConnection)
+
+
+def test_library_connection_remote_with_bad_ciphertext_falls_back(
+    tmp_path: Path,
+) -> None:
+    from app.connection import LocalConnection
+    from app.crypto import load_or_create_key
+    from app.scanner import _library_connection
+
+    enc_key = load_or_create_key(tmp_path)
+    lib = Library(
+        name="L", path="/nas/movies", media_type="movie",
+        connection_type="ssh", connection_config_encrypted="not-a-valid-token",
+    )
+    conn = _library_connection(lib, enc_key)
+    assert isinstance(conn, LocalConnection)
+
+
+def test_relative_folder_handles_mixed_separators() -> None:
+    from app.scanner import _relative_folder
+
+    # folder normalised to /, library has backslashes → must still resolve
+    rel = _relative_folder(
+        "C:/m/Film (2020)", r"C:\m",
+    )
+    assert rel == "Film (2020)"
+
+
+@pytest.mark.asyncio
+async def test_find_video_file_async_depths() -> None:
+    from app.scanner import _find_video_file_async
+
+    files = {
+        "/root/Film/video.mkv": b"",
+        "/root/Show/Season 01/ep01.mp4": b"",
+        "/root/Show/readme.txt": b"",
+    }
+    conn = _FakeConnection("/root", files)
+
+    # Depth-1 video found
+    assert await _find_video_file_async(conn, "Film") == "Film/video.mkv"
+    # Depth-2 video found
+    assert await _find_video_file_async(conn, "Show") == "Show/Season 01/ep01.mp4"
+
+
+@pytest.mark.asyncio
+async def test_nfo_exists_async_via_connection() -> None:
+    from app.scanner import _nfo_exists_async
+
+    files = {"/root/Film/movie.nfo": b"<movie/>"}
+    conn = _FakeConnection("/root", files)
+    assert await _nfo_exists_async(conn, "Film", "movie") is True
+    assert await _nfo_exists_async(conn, "Film", "tv") is False  # tvshow.nfo absent

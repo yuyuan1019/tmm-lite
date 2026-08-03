@@ -117,14 +117,7 @@ class LocalConnection(Connection):
 
     async def list_dir(self, path: str) -> list[str]:
         p = _resolve(self._root, path)
-        try:
-            return sorted(
-                child.name
-                for child in p.iterdir()
-                if child.is_dir()
-            )
-        except OSError:
-            return []
+        return sorted(child.name for child in p.iterdir())
 
     async def is_file(self, path: str) -> bool:
         return _resolve(self._root, path).is_file()

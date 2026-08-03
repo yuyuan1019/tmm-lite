@@ -30,6 +30,16 @@ def nfo_exists(folder: Path, media_type: str) -> bool:
     return False
 
 
+def build_movie_nfo_bytes(meta: ScrapedMeta) -> bytes:
+    """Return the XML bytes for a ``movie.nfo`` file."""
+    return _build_nfo_bytes("movie", meta)
+
+
+def build_tvshow_nfo_bytes(meta: ScrapedMeta) -> bytes:
+    """Return the XML bytes for a ``tvshow.nfo`` file."""
+    return _build_nfo_bytes("tv", meta)
+
+
 def write_movie_nfo(folder: Path, meta: ScrapedMeta) -> Path:
     """Write ``movie.nfo`` to *folder* and return the file path."""
     return _write_nfo(folder, "movie", meta)
@@ -45,8 +55,8 @@ def write_tvshow_nfo(folder: Path, meta: ScrapedMeta) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def _build_nfo(media_type: str, meta: ScrapedMeta) -> etree._Element:
-    """Build an lxml ElementTree for the NFO."""
+def _build_nfo_bytes(media_type: str, meta: ScrapedMeta) -> bytes:
+    """Build and serialize an lxml ElementTree for the NFO."""
     root_tag = "movie" if media_type == "movie" else "tvshow"
     root = etree.Element(root_tag)
 
@@ -79,7 +89,13 @@ def _build_nfo(media_type: str, meta: ScrapedMeta) -> etree._Element:
     uniqueid.set("default", "true")
     uniqueid.text = meta.source_id
 
-    return root
+    return etree.tostring(
+        root,
+        xml_declaration=True,
+        encoding="UTF-8",
+        standalone=True,
+        pretty_print=True,
+    )
 
 
 def _add_text(parent: etree._Element, tag: str, text: str) -> etree._Element:
@@ -91,16 +107,7 @@ def _add_text(parent: etree._Element, tag: str, text: str) -> etree._Element:
 
 def _write_nfo(folder: Path, media_type: str, meta: ScrapedMeta) -> Path:
     """Build, serialize, and atomically write the NFO file."""
-    root = _build_nfo(media_type, meta)
-
-    # Serialize with XML declaration
-    xml_bytes = etree.tostring(
-        root,
-        xml_declaration=True,
-        encoding="UTF-8",
-        standalone=True,
-        pretty_print=True,
-    )
+    xml_bytes = _build_nfo_bytes(media_type, meta)
 
     # Determine target path
     filename = "movie.nfo" if media_type == "movie" else "tvshow.nfo"

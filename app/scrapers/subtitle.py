@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from app.connection import Connection
 from app.scrapers.opensubtitles import OpenSubtitlesScraper, SubtitleResult
 from app.scrapers.subdl import SubDLScraper
 
@@ -61,10 +62,13 @@ class SubtitleDownloader:
         media_folder: Path,
         video_filename: str | None = None,
         imdb_id: str | None = None,
+        connection: Connection | None = None,
     ) -> Path | None:
         """Download the best-matching subtitle to *media_folder*.
 
-        Returns the path to the downloaded file, or ``None``.
+        Returns the local path to the downloaded file, or ``None``.
+        When *connection* is provided, the subtitle is written through it
+        instead of to the local filesystem.
         """
         lang_str = ",".join(self._languages[:3])  # max 3 languages per query
 
@@ -73,7 +77,7 @@ class SubtitleDownloader:
             try:
                 result = await self._search_os(title, year, lang_str, imdb_id)
                 if result is not None:
-                    return await self._save(result, media_folder, video_filename)
+                    return await self._save(result, media_folder, video_filename, connection)
             except Exception:
                 logger.warning("OpenSubtitles failed, trying SubDL", exc_info=True)
 
@@ -81,7 +85,7 @@ class SubtitleDownloader:
         try:
             result = await self._search_subdl(title, year, lang_str)
             if result is not None:
-                return await self._save(result, media_folder, video_filename)
+                return await self._save(result, media_folder, video_filename, connection)
         except Exception:
             logger.warning("SubDL failed, no subtitles downloaded", exc_info=True)
 
@@ -124,6 +128,7 @@ class SubtitleDownloader:
         result: SubtitleResult,
         folder: Path,
         video_filename: str | None = None,
+        connection: Connection | None = None,
     ) -> Path:
         """Download and save the subtitle file."""
         if result.provider == "opensubtitles" and self._os is not None:
@@ -152,8 +157,13 @@ class SubtitleDownloader:
         else:
             suffix = lang_code
 
-        dest_folder.mkdir(parents=True, exist_ok=True)
         dest = dest_folder / f"{stem}.{suffix}.srt"
-        dest.write_bytes(data)
+        rel_path = dest.relative_to(folder).as_posix() if connection is not None else None
+
+        if connection is not None and rel_path is not None:
+            await connection.write_bytes(rel_path, data)
+        else:
+            dest_folder.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
         logger.info("Subtitle saved: %s", dest)
         return dest

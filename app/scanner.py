@@ -13,13 +13,15 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from app import VIDEO_EXTENSIONS
 from app.config import AppConfig
+from app.connection import Connection, ConnectionConfig, LocalConnection, create_connection
+from app.crypto import decrypt_dict
 from app.database import Library, MediaItem, ScrapeLog
 from app.exceptions import (
     ItemNotFoundError,
@@ -27,7 +29,7 @@ from app.exceptions import (
     ScrapeError,
     TmdbAuthError,
 )
-from app.nfo_writer import nfo_exists, write_movie_nfo, write_tvshow_nfo
+from app.nfo_writer import build_movie_nfo_bytes, build_tvshow_nfo_bytes
 from app.parsers.filename_parser import ParsedName, parse_folder_name
 from app.scrapers.base import ScrapedMeta
 from app.scrapers.douban import DoubanScraper
@@ -46,7 +48,11 @@ class ScrapeTarget:
     """Immutable DTO passed from DB read to network scrape."""
 
     id: int
-    folder_path: Path
+    library_id: int
+    library_path: str
+    connection_type: str
+    connection_config_encrypted: str | None
+    folder_path: str
     media_type: str
     parsed_title: str | None
     parsed_year: int | None
@@ -94,6 +100,119 @@ def normalize_path(path: str) -> str:
     return norm.replace("\\", "/")
 
 
+def _relative_folder(folder_path: str, library_path: str) -> str:
+    """Return *folder_path* relative to *library_path* as a POSIX string."""
+    fp = PurePosixPath(normalize_path(folder_path))
+    lp = PurePosixPath(normalize_path(library_path))
+    return str(fp.relative_to(lp))
+
+
+def _nfo_filename(media_type: str) -> str:
+    """Return the NFO filename for a media type."""
+    return "movie.nfo" if media_type == "movie" else "tvshow.nfo"
+
+
+def _library_connection(lib: Library, enc_key: bytes | None) -> Connection:
+    """Create a :class:`Connection` for *lib*.
+
+    Local libraries always use :class:`LocalConnection`.
+    Remote libraries decrypt their stored config and create the appropriate
+    connection.  Returns ``LocalConnection`` as a safe fallback when no key
+    is available.
+    """
+    if lib.connection_type == "local" or not lib.connection_type:
+        return LocalConnection(lib.path)
+
+    cfg_enc = lib.connection_config_encrypted
+    if not cfg_enc or enc_key is None:
+        logger.warning(
+            "Library %s is remote but has no credentials/key, falling back to local",
+            lib.path,
+        )
+        return LocalConnection(lib.path)
+
+    try:
+        cfg = decrypt_dict(cfg_enc, enc_key)
+    except Exception as exc:  # noqa: BLE001 (decrypt may raise various errors)
+        logger.warning("Failed to decrypt connection config for %s: %s", lib.path, exc)
+        return LocalConnection(lib.path)
+
+    conn_cfg = ConnectionConfig(
+        type=lib.connection_type,
+        host=str(cfg.get("host", "")),
+        port=int(str(cfg.get("port", 0))) if cfg.get("port") else 0,
+        username=str(cfg.get("username", "")),
+        password=str(cfg.get("password", "")),
+    )
+    return create_connection(conn_cfg, lib.path)
+
+
+async def _nfo_exists_async(conn: Connection, rel_folder: str, media_type: str) -> bool:
+    """Check whether the NFO file exists for *rel_folder* via *conn*."""
+    nfo_path = str(PurePosixPath(rel_folder) / _nfo_filename(media_type))
+    try:
+        return await conn.exists(nfo_path)
+    except OSError:
+        return False
+
+
+async def _find_video_file_async(conn: Connection, rel_folder: str) -> str | None:
+    """Return the relative path of the first video file under *rel_folder*."""
+    try:
+        entries = await conn.list_dir(rel_folder)
+    except OSError:
+        return None
+    for name in entries:
+        child_rel = str(PurePosixPath(rel_folder) / name)
+        try:
+            if await conn.is_file(child_rel):
+                if Path(name).suffix.lower() in VIDEO_EXTENSIONS:
+                    return child_rel
+            elif await conn.is_dir(child_rel):
+                subs = await conn.list_dir(child_rel)
+                for sub in subs:
+                    sub_rel = str(PurePosixPath(child_rel) / sub)
+                    if await conn.is_file(sub_rel) and Path(sub).suffix.lower() in VIDEO_EXTENSIONS:
+                        return sub_rel
+        except OSError:
+            continue
+    return None
+
+
+def _library_connection_from_target(target: ScrapeTarget, enc_key: bytes | None) -> Connection:
+    """Create a :class:`Connection` from a :class:`ScrapeTarget`."""
+    lib = Library(
+        path=target.library_path,
+        media_type=target.media_type,
+        connection_type=target.connection_type,
+        connection_config_encrypted=target.connection_config_encrypted,
+    )
+    return _library_connection(lib, enc_key)
+
+
+async def _discover_folders(conn: Connection, lib: Library) -> set[str]:
+    """Return the set of absolute POSIX folder paths discovered under *lib*.
+
+    Raises ``OSError`` when the library root cannot be read.
+    """
+    found: set[str] = set()
+    entries = await conn.list_dir("")
+
+    for name in entries:
+        rel = name
+        abs_path = str(PurePosixPath(lib.path) / rel)
+        try:
+            if lib.media_type == "movie":
+                if await conn.contains_video(rel):
+                    found.add(normalize_path(abs_path))
+            else:  # tv
+                if await conn.is_dir(rel):
+                    found.add(normalize_path(abs_path))
+        except OSError:
+            continue
+    return found
+
+
 # ---------------------------------------------------------------------------
 # ScanRunner
 # ---------------------------------------------------------------------------
@@ -112,11 +231,13 @@ class ScanRunner:
         config: AppConfig,
         tmdb: TmdbScraper,
         douban: DoubanScraper | None,
+        enc_key: bytes | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._config = config
         self._tmdb = tmdb
         self._douban = douban
+        self._enc_key = enc_key
         self._subtitle: SubtitleDownloader | None = None
         self._running = False
         self._accepting = True
@@ -257,30 +378,30 @@ class ScanRunner:
             found_paths: dict[int, set[str]] = {}
 
             for lib in libs:
-                lib_path = Path(lib.path)
+                conn = _library_connection(lib, self._enc_key)
                 try:
-                    children = sorted(lib_path.iterdir())
-                except OSError as exc:
-                    detail_lines.append(f"库扫描失败: {lib.path}: {exc}")
-                    continue
-
-                found: set[str] = set()
-                for child in children:
-                    if not child.is_dir():
-                        continue
-                    if lib.media_type == "movie":
-                        if contains_video(child):
-                            found.add(normalize_path(str(child)))
-                    else:  # tv
-                        found.add(normalize_path(str(child)))
-
-                # Upsert discovered items
-                with self._session_factory.begin() as sess:
+                    found = await _discover_folders(conn, lib)
+                    # Pre-compute NFO existence for discovered folders
+                    nfo_map: dict[str, bool] = {}
                     for fpath in found:
-                        _upsert_item(sess, lib, fpath, self._config.overwrite_existing_nfo)
+                        rel = _relative_folder(fpath, lib.path)
+                        nfo_map[fpath] = await _nfo_exists_async(conn, rel, lib.media_type)
 
-                fully_scanned.add(lib.id)
-                found_paths[lib.id] = found
+                    # Upsert discovered items
+                    with self._session_factory.begin() as sess:
+                        for fpath in found:
+                            _upsert_item(
+                                sess, lib, fpath, self._config.overwrite_existing_nfo,
+                                has_nfo=nfo_map.get(fpath, False),
+                            )
+
+                    fully_scanned.add(lib.id)
+                    found_paths[lib.id] = found
+                except Exception:
+                    logger.exception("库扫描失败: %s", lib.path)
+                    detail_lines.append(f"库扫描失败: {lib.path}")
+                finally:
+                    await conn.aclose()
 
             # --- Mark missing ---
             with self._session_factory.begin() as sess:
@@ -308,13 +429,20 @@ class ScanRunner:
                 target = self._load_target(item_id)
                 if target is None:
                     continue
+                skip = False
                 if (
                     not self._config.overwrite_existing_nfo
                     and target.status == "pending"
-                    and nfo_exists(target.folder_path, target.media_type)
                 ):
+                    conn = _library_connection_from_target(target, self._enc_key)
+                    try:
+                        rel = _relative_folder(target.folder_path, target.library_path)
+                        skip = await _nfo_exists_async(conn, rel, target.media_type)
+                    finally:
+                        await conn.aclose()
+                if skip:
                     with self._session_factory.begin() as sess:
-                        item = sess.get(MediaItem, target.id)
+                        item = sess.get(MediaItem, item_id)
                         if item is not None:
                             item.status = "matched"
                             item.error_message = None
@@ -327,8 +455,9 @@ class ScanRunner:
                 target = self._load_target(item_id)
                 if target is None:
                     continue
+                conn = _library_connection_from_target(target, self._enc_key)
                 try:
-                    result = await self._scrape_one(target, force=False)
+                    result = await self._scrape_one(target, force=False, conn=conn)
                     with self._session_factory.begin() as sess:
                         _persist_result(sess, target.id, result)
                     matched += 1
@@ -422,8 +551,9 @@ class ScanRunner:
             sess.flush()
             log_id = log.id
 
+        conn = _library_connection_from_target(target, self._enc_key)
         try:
-            result = await self._scrape_one(target, force=True)
+            result = await self._scrape_one(target, force=True, conn=conn)
             with self._session_factory.begin() as sess:
                 _persist_result(sess, target.id, result)
             matched = 1
@@ -437,6 +567,7 @@ class ScanRunner:
             failed = 1
             detail = f"手动重刮: {target.folder_path}: {exc}"
         finally:
+            await conn.aclose()
             if log_id is not None:
                 with self._session_factory.begin() as sess:
                     rescrape_log = sess.get(ScrapeLog, log_id)
@@ -458,18 +589,20 @@ class ScanRunner:
     # ------------------------------------------------------------------
 
     async def _scrape_one(
-        self, target: ScrapeTarget, *, force: bool,
+        self, target: ScrapeTarget, *, force: bool, conn: Connection,
     ) -> ScrapeResult:
         """Scrape a single item.  ``force`` bypasses NFO skip.
 
         Raises on failure; the caller persists the result or marks failed.
         """
+        rel_folder = _relative_folder(target.folder_path, target.library_path)
+
         # Step 1: NFO skip check
         if (
             not force
             and not self._config.overwrite_existing_nfo
             and target.status == "pending"
-            and nfo_exists(target.folder_path, target.media_type)
+            and await _nfo_exists_async(conn, rel_folder, target.media_type)
         ):
             return ExistingNfoMatched()
 
@@ -504,33 +637,35 @@ class ScanRunner:
 
         # Step 5: Download images
         if meta.poster_url:
-            await self._tmdb.download_image(
-                meta.poster_url, target.folder_path / "poster.jpg",
+            poster_bytes = await self._tmdb.fetch_image(meta.poster_url)
+            await conn.write_bytes(
+                str(PurePosixPath(rel_folder) / "poster.jpg"), poster_bytes,
             )
         if meta.backdrop_url:
-            await self._tmdb.download_image(
-                meta.backdrop_url, target.folder_path / "fanart.jpg",
+            backdrop_bytes = await self._tmdb.fetch_image(meta.backdrop_url)
+            await conn.write_bytes(
+                str(PurePosixPath(rel_folder) / "fanart.jpg"), backdrop_bytes,
             )
 
         # Step 6: Write NFO (last — completion marker before subtitles)
-        if target.media_type == "movie":
-            write_movie_nfo(target.folder_path, meta)
-        else:
-            write_tvshow_nfo(target.folder_path, meta)
+        nfo_rel = str(PurePosixPath(rel_folder) / _nfo_filename(target.media_type))
+        nfo_bytes = (
+            build_movie_nfo_bytes(meta)
+            if target.media_type == "movie"
+            else build_tvshow_nfo_bytes(meta)
+        )
+        await conn.write_bytes(nfo_rel, nfo_bytes)
 
         # Step 7: Subtitle download (best-effort, after NFO)
         if self._config.subtitle_enabled and self._subtitle is not None:
             try:
-                video_file = find_video_file(target.folder_path)
-                video_filename = (
-                    video_file.relative_to(target.folder_path).as_posix()
-                    if video_file is not None else None
-                )
+                video_rel = await _find_video_file_async(conn, rel_folder)
                 await self._subtitle.download(
                     title=target.parsed_title or meta.title,
                     year=meta.year,
-                    media_folder=target.folder_path,
-                    video_filename=video_filename,
+                    media_folder=Path(target.folder_path),
+                    video_filename=video_rel,
+                    connection=conn,
                 )
             except Exception:
                 logger.warning(
@@ -549,9 +684,16 @@ class ScanRunner:
             item = sess.get(MediaItem, item_id)
             if item is None:
                 return None
+            lib = sess.get(Library, item.library_id)
+            if lib is None:
+                return None
             return ScrapeTarget(
                 id=item.id,
-                folder_path=Path(item.folder_path),
+                library_id=item.library_id,
+                library_path=lib.path,
+                connection_type=lib.connection_type or "local",
+                connection_config_encrypted=lib.connection_config_encrypted,
+                folder_path=item.folder_path,
                 media_type=item.media_type,
                 parsed_title=item.parsed_title,
                 parsed_year=item.parsed_year,
@@ -569,6 +711,8 @@ def _upsert_item(
     lib: Library,
     folder_path: str,
     overwrite: bool,
+    *,
+    has_nfo: bool = False,
 ) -> MediaItem | None:
     """Insert or update a MediaItem for a discovered folder.
 
@@ -582,10 +726,10 @@ def _upsert_item(
     ).scalar_one_or_none()
 
     if existing is not None:
-        return _update_existing(sess, existing, lib, parsed, overwrite)
+        return _update_existing(sess, existing, lib, parsed, overwrite, has_nfo=has_nfo)
 
     # New record
-    return _create_new(sess, lib, folder_path, parsed, overwrite)
+    return _create_new(sess, lib, folder_path, parsed, overwrite, has_nfo=has_nfo)
 
 
 def _create_new(
@@ -594,13 +738,13 @@ def _create_new(
     folder_path: str,
     parsed: ParsedName,
     overwrite: bool,
+    *,
+    has_nfo: bool = False,
 ) -> MediaItem:
     """Create a new MediaItem from a newly discovered folder."""
-    has_nfo = nfo_exists(Path(folder_path), lib.media_type)
-
     if has_nfo and not overwrite:
-        # NFO exists → skip to matched (even without title)
-        status = "pending"  # enters queue, will be skipped as ExistingNfoMatched
+        # NFO exists → enters queue, will be skipped as ExistingNfoMatched
+        status = "pending"
     elif parsed.title is None:
         status = "manual_needed"
     else:
@@ -624,10 +768,10 @@ def _update_existing(
     lib: Library,
     parsed: ParsedName,
     overwrite: bool,
+    *,
+    has_nfo: bool = False,
 ) -> MediaItem:
     """Update an existing MediaItem's parsed fields and status."""
-    has_nfo = nfo_exists(Path(item.folder_path), lib.media_type)
-
     if item.status == "missing" or item.status == "manual_needed":
         # Re-discovered
         item.library_id = lib.id

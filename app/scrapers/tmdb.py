@@ -59,27 +59,31 @@ class TmdbScraper:
         detail = await self._detail(search_id, media_type)
         return self._map_to_meta(media_type, detail)
 
-    async def download_image(self, url: str, dest: Path) -> None:
-        """Download an image from *url* and atomically write it to *dest*."""
-        # Sanitise: remove api_key query param from URL (image CDN doesn't need it)
+    async def fetch_image(self, url: str) -> bytes:
+        """Download an image from *url* and return its raw bytes."""
         clean_url = _sanitise_url(url)
-
-        tmp = dest.with_name(dest.name + ".tmp")
         try:
-            async with self._image_client.stream("GET", clean_url) as resp:
-                if resp.status_code != 200:
-                    raise TmdbError(f"TMDB 图片下载失败 HTTP {resp.status_code}: {clean_url}")
-                with open(tmp, "wb") as f:  # noqa: ASYNC230 (small writes, sync is fine)
-                    async for chunk in resp.aiter_bytes():
-                        f.write(chunk)
-            tmp.replace(dest)
+            resp = await self._image_client.get(clean_url)
+            if resp.status_code != 200:
+                raise TmdbError(f"TMDB 图片下载失败 HTTP {resp.status_code}: {clean_url}")
+            return resp.content
         except TmdbError:
             raise
         except Exception as exc:
             raise TmdbError(f"TMDB 图片下载失败: {type(exc).__name__}: {clean_url}") from exc
-        finally:
+
+    async def download_image(self, url: str, dest: Path) -> None:
+        """Download an image from *url* and atomically write it to *dest*."""
+        data = await self.fetch_image(url)
+        tmp = dest.with_name(dest.name + ".tmp")
+        try:
+            with open(tmp, "wb") as f:  # noqa: ASYNC230
+                f.write(data)
+            tmp.replace(dest)
+        except Exception:
             if tmp.exists():
                 tmp.unlink()
+            raise
 
     async def aclose(self) -> None:
         """Close the underlying HTTP clients."""

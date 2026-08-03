@@ -108,7 +108,7 @@ def create_app(
         enc_key = load_or_create_key(data_dir)
 
         # Runner
-        runner = ScanRunner(session_factory, config, tmdb, douban)
+        runner = ScanRunner(session_factory, config, tmdb, douban, enc_key=enc_key)
 
         # Subtitle downloader
         subtitle_dl: SubtitleDownloader | None = None
