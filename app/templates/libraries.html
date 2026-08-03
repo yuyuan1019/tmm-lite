@@ -1,0 +1,250 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>媒体库管理</h1>
+
+{% if is_running %}
+<p class="notice">任务运行中，暂不能修改媒体库。</p>
+{% endif %}
+
+<table>
+<thead>
+<tr><th>名称</th><th>路径</th><th>类型</th><th>连接</th><th>条目数</th><th>操作</th></tr>
+</thead>
+<tbody>
+{% for lib in libraries %}
+<tr>
+  <td>{{ lib.name }}</td>
+  <td>{{ lib.path }}</td>
+  <td>{{ lib.media_type }}</td>
+  <td>{{ lib.connection_type or 'local' }}</td>
+  <td>{{ lib.item_count }}</td>
+  <td>
+    <form method="post" action="/libraries/{{ lib.id }}/delete" style="display:inline">
+      <button type="submit" {% if is_running %}disabled{% endif %}>删除</button>
+    </form>
+  </td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+
+<h2>新增媒体库</h2>
+<form method="post" action="/libraries/add">
+  <label>名称：<input name="name" id="name_input" required placeholder="自动从路径填充"></label>
+
+  <label>路径：
+    <input name="path" id="path_input" required placeholder="/media/movies" style="width:400px">
+    <span id="browse_btn_area">
+      <button type="button" id="browse_btn" onclick="openBrowser()">浏览...</button>
+    </span>
+  </label>
+
+  <label>类型：
+    <select name="media_type" required>
+      <option value="movie">电影 (movie)</option>
+      <option value="tv">电视剧 (tv)</option>
+    </select>
+  </label>
+
+  <label>连接方式：
+    <select name="connection_type" id="connection_type" onchange="onConnChange()">
+      <option value="local">本地路径</option>
+      <option value="ssh">SSH / SFTP</option>
+      <option value="webdav">WebDAV</option>
+    </select>
+  </label>
+
+  <div id="conn_fields" style="display:none">
+    <label>主机：<input name="conn_host" id="conn_host" placeholder="192.168.1.100"></label>
+    <label>端口：<input name="conn_port" id="conn_port" type="number" placeholder="22"></label>
+    <label>用户名：<input name="conn_username" id="conn_username"></label>
+    <label>密码：<input name="conn_password" id="conn_password" type="password"></label>
+    <div style="margin:8px 0;">
+      <button type="button" id="test_btn" onclick="testConnection()" style="background:#2980b9;">🔌 测试连接</button>
+      <span id="test_status" style="margin-left:8px; font-size:13px;"></span>
+    </div>
+    <div id="remote_browse_area" style="display:none;">
+      <button type="button" onclick="openBrowser()" style="background:#27ae60;">📂 选择远程文件夹</button>
+      <span style="font-size:12px; color:#888;">连接成功后可选</span>
+    </div>
+  </div>
+
+  <button type="submit" {% if is_running %}disabled{% endif %}>添加</button>
+</form>
+
+<!-- Folder browser modal -->
+<div id="browser_modal" style="display:none; position:fixed; top:10%; left:10%; width:80%; height:70%; background:white; border:2px solid #2c3e50; border-radius:8px; z-index:1000; overflow:auto; padding:16px;">
+  <div style="display:flex; justify-content:space-between; margin-bottom:12px;">
+    <h3 style="margin:0">选择文件夹</h3>
+    <button type="button" onclick="closeBrowser()">✕ 关闭</button>
+  </div>
+  <div id="browser_path" style="background:#f0f0f0; padding:8px; border-radius:4px; margin-bottom:8px; font-family:monospace;">/</div>
+  <div id="browser_hint" style="background:#fffbe6; border:1px solid #f0c36d; padding:8px 10px; border-radius:4px; margin-bottom:8px; font-size:12px; line-height:1.6;">
+    📌 <b>只能看到挂载进容器的目录</b>。如果这里没有你想要的文件夹，请先编辑 <code>docker-compose.yml</code> 添加类似条目并重启：
+    <pre style="margin:6px 0 0; padding:6px 8px; background:#f7f7f7; border-radius:3px; font-size:12px;">volumes:
+  - /你的/电影/目录:/media/电影</pre>
+    然后点击下方“重新加载”刷新列表。
+    <div style="margin-top:6px;">
+      <button type="button" onclick="reloadBrowser()" style="font-size:12px; padding:2px 8px;">🔄 重新加载</button>
+    </div>
+  </div>
+  <div id="browser_error" style="color:red; display:none; margin-bottom:8px;"></div>
+  <div id="browser_items" style="max-height:400px; overflow-y:auto;">
+    <p>加载中...</p>
+  </div>
+  <div style="margin-top:12px;">
+    <button type="button" onclick="selectCurrentPath()" style="background:#27ae60;">✓ 选择当前路径</button>
+    <button type="button" onclick="goParent()">⬆ 上级目录</button>
+  </div>
+</div>
+
+<script>
+var browsePath = '/';
+var currentParent = null;
+var remoteVerified = false;
+
+function onConnChange() {
+  var t = document.getElementById('connection_type').value;
+  var connDiv = document.getElementById('conn_fields');
+  var browseArea = document.getElementById('browse_btn_area');
+  var remoteBrowse = document.getElementById('remote_browse_area');
+
+  if (t === 'local') {
+    connDiv.style.display = 'none';
+    browseArea.style.display = 'inline';
+    remoteVerified = false;
+    document.getElementById('test_status').textContent = '';
+    remoteBrowse.style.display = 'none';
+  } else {
+    connDiv.style.display = 'block';
+    browseArea.style.display = 'none';
+    if (!remoteVerified) {
+      remoteBrowse.style.display = 'none';
+    }
+  }
+}
+
+function openBrowser() {
+  var modal = document.getElementById('browser_modal');
+  var ct = document.getElementById('connection_type').value;
+  var cur = document.getElementById('path_input').value || '/';
+  browsePath = cur;
+  modal.style.display = 'block';
+  // Local-only Docker hint; hide for remote (SSH/WebDAV)
+  document.getElementById('browser_hint').style.display = (ct === 'local') ? 'block' : 'none';
+  loadBrowse(cur);
+}
+
+function closeBrowser() {
+  document.getElementById('browser_modal').style.display = 'none';
+}
+
+function testConnection() {
+  var ct = document.getElementById('connection_type').value;
+  var host = document.getElementById('conn_host').value.trim();
+  var port = document.getElementById('conn_port').value.trim();
+  var user = document.getElementById('conn_username').value.trim();
+  var pass = document.getElementById('conn_password').value;
+
+  if (!host) {
+    document.getElementById('test_status').innerHTML = '<span style="color:red;">请输入主机地址</span>';
+    return;
+  }
+
+  document.getElementById('test_status').innerHTML = '<span style="color:#2980b9;">连接中...</span>';
+
+  var params = 'path=/&connection_type=' + ct
+    + '&host=' + encodeURIComponent(host)
+    + '&port=' + encodeURIComponent(port)
+    + '&username=' + encodeURIComponent(user)
+    + '&password=' + encodeURIComponent(pass);
+
+  fetch('/api/browse?' + params)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) {
+        document.getElementById('test_status').innerHTML = '<span style="color:red;">连接失败: ' + data.error + '</span>';
+        remoteVerified = false;
+        document.getElementById('remote_browse_area').style.display = 'none';
+      } else {
+        document.getElementById('test_status').innerHTML = '<span style="color:green;">✓ 连接成功 (' + (data.items ? data.items.length : 0) + ' 个目录)</span>';
+        remoteVerified = true;
+        document.getElementById('remote_browse_area').style.display = 'block';
+      }
+    })
+    .catch(function(err) {
+      document.getElementById('test_status').innerHTML = '<span style="color:red;">连接失败: ' + err + '</span>';
+      remoteVerified = false;
+      document.getElementById('remote_browse_area').style.display = 'none';
+    });
+}
+
+function loadBrowse(path) {
+  browsePath = path;
+  document.getElementById('browser_path').textContent = path;
+  document.getElementById('browser_items').innerHTML = '<p>加载中...</p>';
+  document.getElementById('browser_error').style.display = 'none';
+
+  var ct = document.getElementById('connection_type').value;
+  var params = 'path=' + encodeURIComponent(path) + '&connection_type=' + ct;
+  if (ct !== 'local') {
+    params += '&host=' + encodeURIComponent(document.getElementById('conn_host').value);
+    params += '&port=' + encodeURIComponent(document.getElementById('conn_port').value);
+    params += '&username=' + encodeURIComponent(document.getElementById('conn_username').value);
+    params += '&password=' + encodeURIComponent(document.getElementById('conn_password').value);
+  }
+
+  fetch('/api/browse?' + params)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) {
+        document.getElementById('browser_error').textContent = data.error;
+        document.getElementById('browser_error').style.display = 'block';
+        document.getElementById('browser_items').innerHTML = '';
+        return;
+      }
+      currentParent = data.parent;
+      var html = '';
+      if (!data.items || data.items.length === 0) {
+        html = '<p><em>（空目录）</em></p>';
+      } else {
+        for (var i = 0; i < data.items.length; i++) {
+          var item = data.items[i];
+          var label = '📁 ' + item.name;
+          if (item.mount_source) {
+            label += '  <span style="color:#888; font-size:12px;">(宿主: ' + item.mount_source + ')</span>';
+          }
+          html += '<div style="padding:6px; cursor:pointer; border-bottom:1px solid #eee;" onclick="loadBrowse(\'' + item.path.replace(/'/g, "\\'") + '\')">' + label + '</div>';
+        }
+      }
+      document.getElementById('browser_items').innerHTML = html;
+    })
+    .catch(function(err) {
+      document.getElementById('browser_error').textContent = '连接失败: ' + err;
+      document.getElementById('browser_error').style.display = 'block';
+    });
+}
+
+function goParent() {
+  if (currentParent) {
+    loadBrowse(currentParent);
+  }
+}
+
+function reloadBrowser() {
+  loadBrowse(browsePath);
+}
+
+function selectCurrentPath() {
+  document.getElementById('path_input').value = browsePath;
+  // Auto-fill name from last path segment
+  var parts = browsePath.replace(/\/+$/, '').split('/');
+  var last = parts[parts.length - 1];
+  if (last) {
+    document.getElementById('name_input').value = last;
+    document.getElementById('name_input').placeholder = '自动填充: ' + last;
+  }
+  closeBrowser();
+}
+</script>
+{% endblock %}

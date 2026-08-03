@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>任务日志</h1>
+
+<table>
+<thead>
+<tr><th>开始时间</th><th>结束时间</th><th>耗时</th><th>总计</th><th>成功</th><th>失败</th><th>详情</th></tr>
+</thead>
+<tbody>
+{% for log in logs %}
+<tr>
+  <td>{{ log.started_at | localtime }}</td>
+  <td>{{ log.finished_at | localtime if log.finished_at else '' }}</td>
+  <td>
+    {% if log.finished_at %}
+    {{ ((log.finished_at | string)[:19] ~ '+00:00') | length }}{# approximate #}
+    {% endif %}
+  </td>
+  <td>{{ log.total }}</td>
+  <td>{{ log.matched }}</td>
+  <td>{{ log.failed }}</td>
+  <td>
+    {% if log.detail %}
+    <details><summary>查看</summary><pre>{{ log.detail }}</pre></details>
+    {% endif %}
+  </td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% endblock %}

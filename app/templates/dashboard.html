@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>仪表盘</h1>
+
+{% if key_warning %}
+<div class="warning-banner">{{ key_warning }}</div>
+{% endif %}
+
+<div class="stats">
+  <div class="stat-card">
+    <span class="stat-num">{{ library_count }}</span>
+    <span class="stat-label">媒体库</span>
+  </div>
+  <div class="stat-card">
+    <span class="stat-num">{{ counts.matched }}</span>
+    <span class="stat-label">已匹配</span>
+  </div>
+  <div class="stat-card">
+    <span class="stat-num">{{ counts.pending }}</span>
+    <span class="stat-label">待处理</span>
+  </div>
+  <div class="stat-card">
+    <span class="stat-num">{{ counts.failed }}</span>
+    <span class="stat-label">失败</span>
+  </div>
+  <div class="stat-card">
+    <span class="stat-num">{{ counts.manual_needed }}</span>
+    <span class="stat-label">需人工</span>
+  </div>
+  <div class="stat-card">
+    <span class="stat-num">{{ counts.missing }}</span>
+    <span class="stat-label">文件缺失</span>
+  </div>
+</div>
+
+<div class="actions">
+  <form method="post" action="/run-scrape">
+    <button type="submit" {% if is_running %}disabled{% endif %}>
+      {% if is_running %}任务运行中…{% else %}立即执行一次{% endif %}
+    </button>
+  </form>
+  <span class="status-text">状态：{% if is_running %}运行中{% else %}空闲{% endif %}</span>
+</div>
+
+<div class="info">
+  <p>下次定时任务：{{ next_run_time }}</p>
+  {% if last_log %}
+  <p>最近一次任务：{{ last_log.started_at | localtime }} —
+     总计 {{ last_log.total }} / 成功 {{ last_log.matched }} / 失败 {{ last_log.failed }}</p>
+  {% else %}
+  <p>暂无任务记录</p>
+  {% endif %}
+</div>
+{% endblock %}

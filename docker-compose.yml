@@ -1,0 +1,15 @@
+services:
+  tmm-lite:
+    build: .
+    container_name: tmm-lite
+    ports:
+      - "8000:8000"
+    environment:
+      - TZ=Asia/Shanghai
+      # - TMDB_API_KEY=你的key   # 也可在 Web 设置页填写（设置页优先）
+      # - PUID=1000              # 如实现了用户映射入口脚本再启用
+    volumes:
+      - ./data:/app/data                      # 配置 + 数据库
+      - /path/to/movies:/media/movies         # ← 改成你的电影目录
+      - /path/to/tvshows:/media/tvshows       # ← 改成你的剧集目录
+    restart: unless-stopped

@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>刮削结果</h1>
+
+<div class="tabs">
+  <a href="/items" class="tab {% if not current_status %}active{% endif %}">全部 ({{ tab_counts.values() | list | sum }})</a>
+  {% for s in ('pending','matched','failed','manual_needed','missing') %}
+  <a href="/items?status={{ s }}" class="tab {% if current_status==s %}active{% endif %}">{{ s }} ({{ tab_counts[s] }})</a>
+  {% endfor %}
+</div>
+
+<table>
+<thead>
+<tr><th>ID</th><th>识别标题</th><th>年份</th><th>类型</th><th>匹配标题</th><th>评分</th><th>状态</th><th>失败原因</th><th>操作</th></tr>
+</thead>
+<tbody>
+{% for item in items %}
+<tr>
+  <td>{{ item.id }}</td>
+  <td>{% if item.status == 'manual_needed' %}<span class="text-warn">{{ item.folder_path }}</span>{% else %}{{ item.parsed_title or '' }}{% endif %}</td>
+  <td>{{ item.parsed_year or '' }}</td>
+  <td>{{ item.media_type }}</td>
+  <td>{{ item.matched_title or '' }}</td>
+  <td>{{ item.rating or '' }}</td>
+  <td><span class="badge badge-{{ item.status }}">{{ item.status }}</span></td>
+  <td title="{{ item.error_message or '' }}">{{ (item.error_message or '')[:50] }}</td>
+  <td>
+    <form method="post" action="/items/{{ item.id }}/rescrape">
+      <button type="submit" {% if is_running %}disabled{% endif %}>重新刮削</button>
+    </form>
+  </td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% endblock %}

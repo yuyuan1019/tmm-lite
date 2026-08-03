@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>设置</h1>
+
+<form method="post" action="/settings">
+  <fieldset>
+    <legend>TMDB API Key</legend>
+    <label>
+      <input type="password" name="tmdb_api_key" placeholder="{{ key_placeholder }}" style="width:300px">
+      <a href="https://www.themoviedb.org/settings/api" target="_blank" style="font-size:12px; margin-left:8px;">📋 申请 API Key →</a>
+    </label>
+    <label>
+      <input type="checkbox" name="clear_tmdb_api_key"> 清除已保存 Key（恢复环境变量回退）
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>豆瓣</legend>
+    <label>
+      <input type="checkbox" name="use_douban" {% if config.use_douban %}checked{% endif %}> 启用豆瓣补充信息
+    </label>
+    <label>
+      请求间隔（秒）：<input type="number" name="douban_delay_seconds" step="0.5" min="0.5" value="{{ config.douban_delay_seconds }}">
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>刮削</legend>
+    <label>
+      <input type="checkbox" name="overwrite_existing_nfo" {% if config.overwrite_existing_nfo %}checked{% endif %}> 覆盖已有 NFO
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>字幕下载</legend>
+    <label>
+      <input type="checkbox" name="subtitle_enabled" {% if config.subtitle_enabled %}checked{% endif %}> 启用自动字幕下载
+    </label>
+    <label>
+      OpenSubtitles API Key：<input type="password" name="opensubtitles_api_key" placeholder="{% if config.opensubtitles_api_key %}已设置{% else %}未设置{% endif %}" style="width:300px">
+      <a href="https://www.opensubtitles.com/consumers" target="_blank" style="font-size:12px; margin-left:8px;">📋 申请 API Key →</a>
+    </label>
+    <label>
+      首选语言（ISO 639-2 码，逗号分隔）：
+      <input type="text" name="subtitle_languages" value="{{ config.subtitle_languages }}" placeholder="chi,zho,zh">
+    </label>
+    <p><small>常用码：chi/zho=中文, eng=英语, jpn=日语, kor=韩语。OpenSubtitles 需免费注册 API Key。下载失败不影响刮削状态。</small></p>
+  </fieldset>
+
+  <fieldset>
+    <legend>定时任务</legend>
+    <label>
+      Cron 表达式：<input type="text" name="schedule_cron" value="{{ config.schedule_cron }}">
+    </label>
+    <p>下次运行时间：{{ next_run_time }}</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>媒体库浏览根</legend>
+    <label>
+      本地浏览起点：
+      <input type="text" name="browse_root" value="{{ config.browse_root }}" style="width:300px" placeholder="/media">
+    </label>
+    <p><small>
+      “浏览...”按钮只会列出该目录下的子目录。Docker 部署时建议保持 <code>/media</code>，
+      并把宿主机上的电影/剧集目录挂载到该路径下。设为 <code>/</code> 会列出容器所有顶层目录（不建议）。
+    </small></p>
+  </fieldset>
+
+  <button type="submit">保存设置</button>
+</form>
+{% endblock %}

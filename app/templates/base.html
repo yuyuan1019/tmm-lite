@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TMM-Lite</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav>
+  <a href="/">仪表盘</a>
+  <a href="/libraries">媒体库</a>
+  <a href="/items">条目</a>
+  <a href="/logs">日志</a>
+  <a href="/settings">设置</a>
+</nav>
+
+{% if ok %}
+<div class="flash flash-ok">{{ ok }}</div>
+{% endif %}
+{% if err %}
+<div class="flash flash-err">{{ err }}</div>
+{% endif %}
+
+<main>
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>
