@@ -89,6 +89,12 @@ def _build_nfo_bytes(media_type: str, meta: ScrapedMeta) -> bytes:
     uniqueid.set("default", "true")
     uniqueid.text = meta.source_id
 
+    # IMDb id — used by Kodi scrapers and for exact subtitle matching
+    if meta.imdb_id:
+        imdb_uid = etree.SubElement(root, "uniqueid")
+        imdb_uid.set("type", "imdb")
+        imdb_uid.text = meta.imdb_id
+
     return etree.tostring(
         root,
         xml_declaration=True,

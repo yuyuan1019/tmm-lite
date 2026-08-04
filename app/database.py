@@ -120,6 +120,7 @@ class MediaItem(Base):
     )
     source: Mapped[str | None] = mapped_column(String(20))
     source_id: Mapped[str | None] = mapped_column(String(50))
+    imdb_id: Mapped[str | None] = mapped_column(String(20))
     matched_title: Mapped[str | None] = mapped_column(String(500))
     matched_original_title: Mapped[str | None] = mapped_column(String(500))
     matched_year: Mapped[int | None] = mapped_column(Integer)
@@ -182,7 +183,8 @@ def _set_sqlite_pragma(dbapi_connection, connection_record):  # type: ignore[no-
 def init_db(db_path: Path) -> Engine:
     """Create the SQLAlchemy engine and run ``CREATE TABLE IF NOT EXISTS``.
 
-    Idempotent — safe to call multiple times.  Returns the engine.
+    Idempotent — safe to call multiple times.  Applies lightweight migrations
+    (e.g. new columns) to pre-existing SQLite files.  Returns the engine.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(
@@ -191,8 +193,22 @@ def init_db(db_path: Path) -> Engine:
     )
     event.listen(engine, "connect", _set_sqlite_pragma)
     Base.metadata.create_all(engine)
+    _migrate(engine)
     logger.info("Database initialised at %s", db_path)
     return engine
+
+
+def _migrate(engine: Engine) -> None:
+    """Add columns that newer models introduced, to pre-existing SQLite files."""
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        cols = [
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(media_item)")).fetchall()
+        ]
+        if "imdb_id" not in cols:
+            conn.execute(text("ALTER TABLE media_item ADD COLUMN imdb_id VARCHAR(20)"))
 
 
 def create_session_factory(

@@ -102,6 +102,9 @@ _RE_LEADING_INDEX = re.compile(
 # Brackets containing noise (【】or [])
 _RE_SQUARE_BRACKET = re.compile(r"【[^】]*】|\[[^\]]*\]")
 
+# Chinese season-count marker in download-site names: "黑镜 Black Mirror[全7季]"
+_RE_SEASON_COUNT = re.compile(r"全\d{1,3}季")
+
 # Chars to replace with space
 _RE_DOT_UNDERSCORE = re.compile(r"[._]+")
 
@@ -251,13 +254,16 @@ def _clean_title(region: str) -> str | None:
 
     region = _RE_SQUARE_BRACKET.sub(_handle_bracket, region)
 
-    # Step 7d: remove noise words (longest-first, case-insensitive, boundary-aware)
+    # Step 7d: Chinese season-count marker like "全7季" in [全7季]
+    region = _RE_SEASON_COUNT.sub(" ", region)
+
+    # Step 7e: remove noise words (longest-first, case-insensitive, boundary-aware)
     for word in _NOISE_SORTED:
         # Build a pattern that requires word boundaries on both sides
         # Boundary = start/end of string or any non-alnum, non-CJK char
         region = _replace_noise_word(region, word)
 
-    # Step 7e: replace dots and underscores with spaces, collapse whitespace, strip
+    # Step 7f: replace dots and underscores with spaces, collapse whitespace, strip
     region = _RE_DOT_UNDERSCORE.sub(" ", region)
     # Collapse multiple whitespace
     region = re.sub(r"\s+", " ", region).strip()

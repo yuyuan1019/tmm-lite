@@ -219,6 +219,7 @@ CREATE TABLE media_item (
                    CHECK (status IN ('pending','matched','failed','manual_needed','missing')),
     source         VARCHAR(20),          -- v1 固定为 'tmdb'
     source_id      VARCHAR(50),
+    imdb_id        VARCHAR(20),          -- 用于字幕精确匹配（TTMDB detail.imdb_id）
     matched_title  VARCHAR(500),
     matched_original_title VARCHAR(500),
     matched_year   INTEGER,
@@ -253,7 +254,7 @@ CREATE TABLE app_meta (
 
 - SQLite 连接必须开启外键：`PRAGMA foreign_keys=ON`（每连接 event listener），否则级联删除失效。
 - engine 参数：`connect_args={"check_same_thread": False}`（FastAPI + 后台任务共用）。
-- `init_db(db_path)`：`Base.metadata.create_all`，幂等，返回 `Engine`。
+- `init_db(db_path)`：`Base.metadata.create_all`，幂等，返回 `Engine`。随后执行轻量迁移 `_migrate`：用 `PRAGMA table_info` 检查旧库缺列（如 `imdb_id`），缺则 `ALTER TABLE ADD COLUMN`。
 - `create_session_factory(engine)`：返回 `sessionmaker(bind=engine, expire_on_commit=False)`。
 - Runner 和 FastAPI 依赖均使用 `with session_factory() as session:`，不得泄漏 Session；Web 层的
   `get_session` 用 yield 模式确保关闭。
@@ -328,8 +329,9 @@ NOISE_WORDS = {
    a. 删除开头中文媒体序号 `^\d{1,4}[.．、_]\s*(?=[一-鿿])`（`14.奇异博士1` → `奇异博士1`）。仅当分隔符后紧跟中文字符时剥离，故 `50.First.Dates`（拉丁）、`2012`（无分隔符）、`007：大破天幕杀机`（冒号）不受影响。
    b. 先删除末尾发布组 `-XXX`，使 `x264-GROUP` 先恢复成可识别的 `x264`。
    c. 处理方括号：`【】`/`[]` 内整体命中噪音词时连括号删除，否则只剥括号保留文本。
-   d. 将 NOISE_WORDS 按长度降序逐个做大小写不敏感的边界替换；边界为字符串首尾或非字母、数字、中文字符，因此 `h.264`、`国语中字` 可作为整体删除，又不会误删正常片名子串。
-   e. `.`、`_` 替换为空格，合并连续空白后 strip。中文与数字混排不额外切分（`流浪地球2` 保持原样）。
+   d. 剥离中文季数标记 `全\d{1,3}季`（下载站命名如 `黑镜 Black Mirror[全7季]` → `黑镜 Black Mirror`）。
+   e. 将 NOISE_WORDS 按长度降序逐个做大小写不敏感的边界替换；边界为字符串首尾或非字母、数字、中文字符，因此 `h.264`、`国语中字` 可作为整体删除，又不会误删正常片名子串。
+   f. `.`、`_` 替换为空格，合并连续空白后 strip。中文与数字混排不额外切分（`流浪地球2` 保持原样）。
 8. 结果标题为空串 → `title=None`（调用方仅在没有可跳过 NFO 时置 manual_needed）。
 9. 函数不抛任何异常；内部异常捕获后返回全 None 并 `logger.debug`。
 
@@ -438,7 +440,10 @@ class TmdbScraper:
 |---|---|---|---|
 | source | 常量 `"tmdb"` | 同 | |
 | source_id | detail `id` | 同 | str() |
+| imdb_id | detail `imdb_id` | 同 | 字幕精确匹配与 NFO uniqueid 用 |
 | title | detail `title` | detail `name` | 空则用 original_* |
+
+> imdb_id 缺失时（TMDB 剧集详情常缺），补调 `/movie|tv/{id}/external_ids` 取回。
 | original_title | detail `original_title` | detail `original_name` | |
 | year | `release_date` 前 4 位 | `first_air_date` 前 4 位 | 空串/None → None |
 | overview | detail `overview` | 同 | 空串 → None |
@@ -683,7 +688,7 @@ return reload log_id with expire_on_commit=False
   - 库根目录直接放的散视频文件 → 每个散文件是一个**文件条目**（`folder_path` 指向视频文件本身）。
   - 目录含 `BDMV/`/`VIDEO_TS/` 子目录（光盘结构）→ 该目录即电影条目。
   - 无直接视频、且**恰有一个**子目录含视频、且自身名字解析出「标题+年份」→ 该目录为深层电影条目（如 `电影名 (2020)/Video/电影.mkv`）。
-- **电视剧**：非根目录「直接含视频 **或** 含 Season 子目录（`Season 01`/`S01`/`第1季`）」即一部剧，命中即停止递归（避免每季被多计一部）；否则递归。
+- **电视剧**：非根目录「直接含视频 **或** 含 Season 子目录（`Season 01`/`S01`/`第1季`）**或** 名字解析出标题且子目录为集数文件夹（`第3集`/`S01E02`，如 `黑镜 Black Mirror[全7季]/第3集（2016）/`）」即一部剧，命中即停止递归（避免每季/每集被多计）；否则递归。
 - 递归时跳过噪音目录集合（`extras`/`trailers`/`sample(s)`/`screenshots`/`featurettes`/`behind the scenes`/`deleted scenes`/`interviews`/`making of`/`outtakes`/`bonus`/`extra`/`.actors`/`.backdrops`/`logo` 等）。
 - `contains_video(folder)`：递归深度 ≤2 找 VIDEO_EXTENSIONS 文件（供深层判断与字幕定位使用，电影可能有 `BDMV/` 子层）。
 
@@ -749,10 +754,11 @@ NFO 最后原子写入，因此失败不会产生或替换 NFO；强制重刮时
 - 通过同一个 `_claim()` 占位，与全量/重刮互斥。
 - 字幕功能未启用（`subtitle_enabled=false` 或未配置下载器）→ 抛 `ScrapeError`。
 - item 不存在 → 抛 `ItemNotFoundError`（Web 层转 404）；标题为空 → 抛 `ScrapeError`。
-- 与自动刮削共用 `_download_subtitle_for_target(target, conn, *, title, year)`：
+- 与自动刮削共用 `_download_subtitle_for_target(target, conn, *, title, year, imdb_id=None)`：
   - 文件夹条目：`media_folder=Path(folder_path)`，`video_filename` 为相对该文件夹的片段（避免路径前缀重复）。
   - 文件条目（`is_file`）：`media_folder=Path(folder_path).parent`，`video_filename=文件名`（否则本地写入崩溃）。
-- 手动条目标题/年份优先 `matched_title`/`matched_year`，回退 `parsed_title`/`parsed_year`。
+- 手动条目标题优先 `matched_original_title`（英文原名，字幕站命中率高）→ `matched_title` → `parsed_title`；年份优先 `matched_year`；`imdb_id` 从条目读取传给下载器做精确匹配。
+- **写一条 `ScrapeLog(total=1)`**：命中 `detail=手动字幕: <路径>: <文件名>`，未命中 `detail=手动字幕: <路径>: 未找到可用字幕`，异常 `detail=手动字幕: <路径>: <异常>`；`/logs` 页可见。
 - 返回下载到的字幕路径（无匹配返回 `None`），Web 层据此提示。
 
 ---

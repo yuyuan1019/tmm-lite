@@ -342,3 +342,23 @@ async def test_search_falls_back_to_stripped_cjk_title(tmdb: TmdbScraper) -> Non
     assert result.source_id == "157336"
     queries = [c.request.url.params.get("query") for c in route.calls]
     assert queries == ["奇异博士1", "奇异博士1", "奇异博士"]
+
+
+@pytest.mark.asyncio
+async def test_imdb_id_from_external_ids_fallback(tmdb: TmdbScraper) -> None:
+    """When the detail response lacks imdb_id, external_ids is consulted."""
+    search_json = _json("tmdb_search_movie.json")
+    detail = dict(_json("tmdb_movie_detail.json"))
+    detail.pop("imdb_id")
+
+    with respx.mock as mock:
+        mock.get("https://api.themoviedb.org/3/search/movie").respond(json=search_json)
+        mock.get("https://api.themoviedb.org/3/movie/157336").respond(json=detail)
+        mock.get("https://api.themoviedb.org/3/movie/157336/external_ids").respond(
+            json={"id": 157336, "imdb_id": "tt0816692"}
+        )
+
+        result = await tmdb.search_and_fetch("星际穿越", 2014, "movie")
+
+    assert result is not None
+    assert result.imdb_id == "tt0816692"

@@ -305,9 +305,14 @@ async def _discover_walk(
         for d in subdirs:
             await _discover_walk(conn, lib, _join_rel(rel, d), found, is_root=False)
     else:  # tv
-        if not is_root and (videos or any(_RE_SEASON_DIR.match(s) for s in subdirs)):
-            # A folder holding episodes directly or Season sub-folders is a show.
-            # Stop descending so each Season folder is not counted as a show.
+        if not is_root and (
+            videos
+            or any(_RE_SEASON_DIR.match(s) for s in subdirs)
+            or _looks_like_episode_container(rel, subdirs)
+        ):
+            # A folder holding episodes directly, Season sub-folders, or
+            # per-episode sub-folders (第3集 / S01E02) is one show.  Stop
+            # descending so Season/episode folders are not counted as shows.
             found.add(normalize_path(str(PurePosixPath(lib.path) / rel)))
             return
         for d in subdirs:
@@ -335,6 +340,26 @@ async def _looks_like_deep_movie(conn: Connection, rel: str, subdirs: list[str])
         return await conn.contains_video(_join_rel(rel, subdirs[0]))
     except OSError:
         return False
+
+
+def _is_episode_only_name(name: str) -> bool:
+    """True when *name* is an episode label with no show title (第3集, S01E02)."""
+    parsed = parse_folder_name(name)
+    return parsed.title is None and parsed.episode is not None
+
+
+def _looks_like_episode_container(rel: str, subdirs: list[str]) -> bool:
+    """True when *rel* is a show whose episodes live one-per-folder.
+
+    Matches e.g. ``黑镜 Black Mirror[全7季]/第3集（2016）/`` — the show folder's
+    own name parses to a title and its immediate sub-folders are episode labels.
+    """
+    if not subdirs:
+        return False
+    parsed = parse_folder_name(Path(rel).name)
+    if not parsed.title:
+        return False
+    return any(_is_episode_only_name(s) for s in subdirs)
 
 
 # ---------------------------------------------------------------------------
@@ -769,7 +794,11 @@ class ScanRunner:
     # ------------------------------------------------------------------
 
     async def _download_subtitle_impl(self, item_id: int) -> Path | None:
-        """Manual subtitle download for a single item (mutex already held)."""
+        """Manual subtitle download for a single item (mutex already held).
+
+        Records a :class:`ScrapeLog` entry so manual subtitle attempts (found or
+        not) are visible on the /logs page.
+        """
         if not self._config.subtitle_enabled or self._subtitle is None:
             raise ScrapeError("字幕功能未启用，请在设置中开启")
 
@@ -777,26 +806,63 @@ class ScanRunner:
         if target is None:
             raise ItemNotFoundError(f"MediaItem {item_id} 不存在")
 
-        # Prefer the matched title/year for a better search; fall back to parsed.
+        # Prefer the matched original (usually English) title + imdb_id for a
+        # better subtitle search; fall back to the parsed/localized title.
         title: str = target.parsed_title or ""
         year: int | None = target.parsed_year
+        imdb_id: str | None = None
         with self._session_factory() as sess:
             item = sess.get(MediaItem, item_id)
             if item is not None:
-                if item.matched_title:
+                if item.matched_original_title:
+                    title = item.matched_original_title
+                elif item.matched_title:
                     title = item.matched_title
                 year = item.matched_year or item.parsed_year
+                imdb_id = item.imdb_id
 
         if not title:
             raise ScrapeError("标题解析为空，无法搜索字幕")
 
+        log_id: int | None = None
+        matched = 0
+        failed = 0
+        detail = ""
+        with self._session_factory.begin() as sess:
+            log = ScrapeLog(
+                started_at=datetime.now(UTC),
+                total=1, matched=0, failed=0,
+            )
+            sess.add(log)
+            sess.flush()
+            log_id = log.id
+
         conn = _library_connection_from_target(target, self._enc_key)
         try:
-            return await self._download_subtitle_for_target(
-                target, conn, title=title, year=year,
+            result = await self._download_subtitle_for_target(
+                target, conn, title=title, year=year, imdb_id=imdb_id,
             )
+            if result is not None:
+                matched = 1
+                detail = f"手动字幕: {target.folder_path}: {result.name}"
+            else:
+                detail = f"手动字幕: {target.folder_path}: 未找到可用字幕"
+            return result
+        except Exception as exc:
+            failed = 1
+            detail = f"手动字幕: {target.folder_path}: {exc}"
+            raise
         finally:
             await conn.aclose()
+            if log_id is not None:
+                with self._session_factory.begin() as sess:
+                    sub_log = sess.get(ScrapeLog, log_id)
+                    if sub_log is not None:
+                        sub_log.finished_at = datetime.now(UTC)
+                        sub_log.total = 1
+                        sub_log.matched = matched
+                        sub_log.failed = failed
+                        sub_log.detail = detail
 
     # ------------------------------------------------------------------
     # Core scrape logic
@@ -866,11 +932,16 @@ class ScanRunner:
         )
         await conn.write_bytes(nfo_rel, nfo_bytes)
 
-        # Step 7: Subtitle download (best-effort, after NFO)
+        # Step 7: Subtitle download (best-effort, after NFO).  Prefer the
+        # original (usually English) title + imdb_id — subtitle sites match far
+        # better on those than on the localized title.
         if self._config.subtitle_enabled and self._subtitle is not None:
             try:
                 await self._download_subtitle_for_target(
-                    target, conn, title=target.parsed_title or meta.title, year=meta.year,
+                    target, conn,
+                    title=meta.original_title or meta.title,
+                    year=meta.year,
+                    imdb_id=meta.imdb_id,
                 )
             except Exception:
                 logger.warning(
@@ -890,6 +961,7 @@ class ScanRunner:
         *,
         title: str,
         year: int | None,
+        imdb_id: str | None = None,
     ) -> Path | None:
         """Download subtitles for *target*; returns the saved path or ``None``.
 
@@ -916,6 +988,7 @@ class ScanRunner:
             year=year,
             media_folder=media_folder,
             video_filename=video_filename,
+            imdb_id=imdb_id,
             connection=conn,
         )
 
@@ -1124,6 +1197,7 @@ def _persist_result(
     # ScrapedMeta
     item.source = result.source
     item.source_id = result.source_id
+    item.imdb_id = result.imdb_id
     item.matched_title = result.title
     item.matched_original_title = result.original_title
     item.matched_year = result.year

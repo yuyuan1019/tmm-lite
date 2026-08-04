@@ -150,6 +150,24 @@ def test_uniqueid_attributes() -> None:
         assert uniqueid.text == "42"
 
 
+def test_imdb_uniqueid_included() -> None:
+    meta = _make_meta(imdb_id="tt1375666")
+    with TemporaryDirectory() as tmp:
+        nfo_path = write_movie_nfo(Path(tmp), meta)
+        tree = etree.parse(str(nfo_path))
+        imdb_uid = tree.getroot().find("uniqueid[@type='imdb']")
+        assert imdb_uid is not None
+        assert imdb_uid.text == "tt1375666"
+
+
+def test_imdb_uniqueid_omitted_when_absent() -> None:
+    meta = _make_meta()  # no imdb_id
+    with TemporaryDirectory() as tmp:
+        nfo_path = write_movie_nfo(Path(tmp), meta)
+        tree = etree.parse(str(nfo_path))
+        assert tree.getroot().find("uniqueid[@type='imdb']") is None
+
+
 # ---------------------------------------------------------------------------
 # M4-T7: nfo_exists
 # ---------------------------------------------------------------------------

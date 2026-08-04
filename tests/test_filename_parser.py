@@ -46,6 +46,8 @@ _PARAMS = [
     ("50.First.Dates (2004)", ParsedName("50 First Dates", 2004, None, None)),
     # M3-T17: "007" prefix kept (colon separator, not an index)
     ("007：大破天幕杀机 (2012)", ParsedName("007：大破天幕杀机", 2012, None, None)),
+    # M3-T18: Chinese season-count marker stripped ("[全7季]")
+    ("黑镜 Black Mirror[全7季]", ParsedName("黑镜 Black Mirror", None, None, None)),
 ]
 
 

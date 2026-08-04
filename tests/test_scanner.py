@@ -1650,3 +1650,124 @@ async def test_rescrape_reparses_folder_name(tmp_path: Path) -> None:
     await runner.rescrape_item(item_id)
 
     assert tmdb.search_and_fetch.await_args.args[0] == "蚁人1"
+
+
+# ---------------------------------------------------------------------------
+# imdb_id storage + subtitle search uses matched data
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_scrape_stores_imdb_id(tmp_path: Path) -> None:
+    movies_dir = tmp_path / "movies"
+    d = movies_dir / "Film (2020)"
+    d.mkdir(parents=True)
+    (d / "movie.mkv").write_text("x")
+
+    h = _setup(tmp_path)
+    runner = h.runner; tmdb = h.tmdb
+    tmdb.search_and_fetch.return_value = _mock_meta(imdb_id="tt1234567")
+    with h.session() as sess:
+        _add_library(sess, "Movies", str(movies_dir), "movie")
+
+    await runner.run_full()
+
+    with h.session() as sess:
+        item = sess.query(MediaItem).one()
+        assert item.imdb_id == "tt1234567"
+
+
+@pytest.mark.asyncio
+async def test_auto_subtitle_uses_imdb_and_original_title(tmp_path: Path) -> None:
+    movies_dir = tmp_path / "movies"
+    d = movies_dir / "Film (2020)"
+    d.mkdir(parents=True)
+    (d / "movie.mkv").write_text("x")
+
+    h = _setup(tmp_path, _make_config(subtitle_enabled=True))
+    runner = h.runner; tmdb = h.tmdb
+    sub = AsyncMock()
+    sub.download.return_value = Path("/fake.srt")
+    sub.aclose = AsyncMock()
+    runner.set_subtitle_downloader(sub)  # type: ignore[arg-type]
+    tmdb.search_and_fetch.return_value = _mock_meta(original_title="Original Film", imdb_id="tt99")
+    with h.session() as sess:
+        _add_library(sess, "Movies", str(movies_dir), "movie")
+
+    await runner.run_full()
+
+    kwargs = sub.download.await_args.kwargs
+    assert kwargs["title"] == "Original Film"
+    assert kwargs["year"] == 2020
+    assert kwargs["imdb_id"] == "tt99"
+
+
+@pytest.mark.asyncio
+async def test_manual_subtitle_writes_log(tmp_path: Path) -> None:
+    from app.database import ScrapeLog
+
+    movies_dir = tmp_path / "movies"
+    d = movies_dir / "Film (2020)"
+    d.mkdir(parents=True)
+    (d / "movie.mkv").write_text("x")
+
+    h = _make_subtitle_runner(tmp_path, [(movies_dir, "movie")])
+    with h.session() as sess:
+        lib = sess.query(Library).one()
+        item_id = _add_item(sess, lib, str(d), "Film", 2020)
+
+    await h.runner.download_subtitle(item_id)
+
+    with h.session() as sess:
+        logs = sess.query(ScrapeLog).all()
+        assert len(logs) == 1
+        assert logs[0].matched == 1
+        assert "手动字幕" in (logs[0].detail or "")
+
+
+@pytest.mark.asyncio
+async def test_manual_subtitle_not_found_log(tmp_path: Path) -> None:
+    from app.database import ScrapeLog
+
+    movies_dir = tmp_path / "movies"
+    d = movies_dir / "Film (2020)"
+    d.mkdir(parents=True)
+    (d / "movie.mkv").write_text("x")
+
+    h = _make_subtitle_runner(tmp_path, [(movies_dir, "movie")])
+    sub = h.runner._subtitle  # type: ignore[attr-defined]
+    sub.download.return_value = None  # no match
+    with h.session() as sess:
+        lib = sess.query(Library).one()
+        item_id = _add_item(sess, lib, str(d), "Film", 2020)
+
+    result = await h.runner.download_subtitle(item_id)
+
+    assert result is None
+    with h.session() as sess:
+        log = sess.query(ScrapeLog).one()
+        assert log.matched == 0
+        assert "未找到可用字幕" in (log.detail or "")
+
+
+@pytest.mark.asyncio
+async def test_discover_tv_episode_subfolders(tmp_path: Path) -> None:
+    """A show whose episodes live one-per-folder yields one item, not per-episode."""
+    tv_dir = tmp_path / "tv"
+    show = tv_dir / "黑镜 Black Mirror[全7季]"
+    for i in range(3):
+        d = show / f"第{i + 1}集（201{6 + i}）"
+        d.mkdir(parents=True)
+        (d / "ep.mkv").write_text("x")
+
+    h = _setup(tmp_path)
+    runner = h.runner; tmdb = h.tmdb
+    tmdb.search_and_fetch.return_value = _mock_meta(title="黑镜")
+    with h.session() as sess:
+        _add_library(sess, "TV", str(tv_dir), "tv")
+
+    log = await runner.run_full()
+    assert log.total == 1
+    with h.session() as sess:
+        items = sess.query(MediaItem).all()
+        assert len(items) == 1
+        assert items[0].parsed_title == "黑镜 Black Mirror"

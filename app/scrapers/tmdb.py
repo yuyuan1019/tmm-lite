@@ -68,7 +68,12 @@ class TmdbScraper:
             return None
 
         detail = await self._detail(search_id, media_type)
-        return self._map_to_meta(media_type, detail)
+        meta = self._map_to_meta(media_type, detail)
+        if meta.imdb_id is None:
+            # TMDB TV details often omit imdb_id; the external_ids endpoint has it.
+            ext = await self._external_ids(search_id, media_type)
+            meta.imdb_id = _str_or_none(ext.get("imdb_id"))
+        return meta
 
     async def fetch_image(self, url: str) -> bytes:
         """Download an image from *url* and return its raw bytes."""
@@ -160,6 +165,14 @@ class TmdbScraper:
             endpoint = f"/movie/{item_id}"
         else:
             endpoint = f"/tv/{item_id}"
+        return await self._get_json(endpoint, self._params())
+
+    async def _external_ids(self, item_id: int, media_type: str) -> dict[str, object]:
+        """Fetch the item's external IDs (some titles carry imdb_id here only)."""
+        if media_type == "movie":
+            endpoint = f"/movie/{item_id}/external_ids"
+        else:
+            endpoint = f"/tv/{item_id}/external_ids"
         return await self._get_json(endpoint, self._params())
 
     async def _get_json(
@@ -261,6 +274,7 @@ class TmdbScraper:
             genres=genres,
             poster_url=(IMAGE_BASE + poster_path) if poster_path else None,
             backdrop_url=(IMAGE_BASE + backdrop_path) if backdrop_path else None,
+            imdb_id=_str_or_none(detail.get("imdb_id")),
         )
 
 

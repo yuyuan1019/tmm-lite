@@ -27,3 +27,4 @@ class ScrapedMeta:
     genres: list[str] = field(default_factory=list)
     poster_url: str | None = None
     backdrop_url: str | None = None
+    imdb_id: str | None = None

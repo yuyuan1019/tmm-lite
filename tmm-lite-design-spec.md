@@ -159,6 +159,7 @@ tmm-lite/
 | status | pending（待处理）/ matched（已匹配）/ failed（失败）/ manual_needed（解析失败需人工处理，见第 8 节）/ missing（磁盘文件夹已删除，见 7.1 第 3 步） |
 | source | v1 固定为 tmdb；豆瓣仅补充简介/评分，不改变主来源 |
 | source_id | 对应数据源的条目 ID |
+| imdb_id | IMDb ID（`tt…`），刮削后保存，用于字幕精确匹配与 NFO uniqueid |
 | matched_title | 刮削后确认的标题 |
 | matched_original_title / matched_year | 刮削结果中的原始标题/年份 |
 | overview | 简介 |

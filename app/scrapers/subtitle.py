@@ -78,6 +78,7 @@ class SubtitleDownloader:
                 result = await self._search_os(title, year, lang_str, imdb_id)
                 if result is not None:
                     return await self._save(result, media_folder, video_filename, connection)
+                logger.info("OpenSubtitles: 无结果 %s (%s, imdb=%s)", title, year, imdb_id)
             except Exception:
                 logger.warning("OpenSubtitles failed, trying SubDL", exc_info=True)
 
@@ -86,9 +87,11 @@ class SubtitleDownloader:
             result = await self._search_subdl(title, year, lang_str)
             if result is not None:
                 return await self._save(result, media_folder, video_filename, connection)
+            logger.info("SubDL: 无结果 %s (%s)", title, year)
         except Exception:
             logger.warning("SubDL failed, no subtitles downloaded", exc_info=True)
 
+        logger.info("未下载到字幕: %s (%s, imdb=%s)", title, year, imdb_id)
         return None
 
     async def aclose(self) -> None:

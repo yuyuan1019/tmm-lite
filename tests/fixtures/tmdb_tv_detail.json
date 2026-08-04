@@ -5,7 +5,13 @@
   "first_air_date": "2023-12-27",
   "overview": "一部关于上海的电视剧",
   "vote_average": 8.5,
-  "genres": [{"id": 18, "name": "剧情"}],
+  "genres": [
+    {
+      "id": 18,
+      "name": "剧情"
+    }
+  ],
   "poster_path": "/tv_p.jpg",
-  "backdrop_path": null
+  "backdrop_path": null,
+  "imdb_id": "tt2177461"
 }

@@ -372,3 +372,26 @@ def test_media_item_library_relationship(tmp_path: Path) -> None:
         ).first()
         assert item is not None
         assert item.library.name == "Relationship Test"
+
+
+def test_migration_adds_imdb_id_column(tmp_path: Path) -> None:
+    """A pre-existing DB without imdb_id gets the column after init_db."""
+    import sqlite3
+
+    from sqlalchemy import text
+
+    db_path = tmp_path / "old.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE media_item (id INTEGER PRIMARY KEY, folder_path VARCHAR(1000) UNIQUE)"
+    )
+    conn.commit()
+    conn.close()
+
+    engine = init_db(db_path)
+    try:
+        with engine.connect() as sess:
+            cols = [r[1] for r in sess.execute(text("PRAGMA table_info(media_item)"))]
+        assert "imdb_id" in cols
+    finally:
+        engine.dispose()

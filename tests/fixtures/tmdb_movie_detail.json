@@ -5,7 +5,17 @@
   "release_date": "2014-11-07",
   "overview": "一部关于太空旅行的电影",
   "vote_average": 8.7,
-  "genres": [{"id": 878, "name": "科幻"}, {"id": 12, "name": "冒险"}],
+  "genres": [
+    {
+      "id": 878,
+      "name": "科幻"
+    },
+    {
+      "id": 12,
+      "name": "冒险"
+    }
+  ],
   "poster_path": "/p.jpg",
-  "backdrop_path": "/b.jpg"
+  "backdrop_path": "/b.jpg",
+  "imdb_id": "tt0816692"
 }
