@@ -857,7 +857,7 @@ redirect("/?ok=任务已启动")
 
 **POST `/rescrape-failed`**（一键重刮失败项）：后台执行 `_rescrape_failed_impl()`——只加载 `status='failed'` 的条目逐条 `_scrape_one(force=True)`，写一条 `ScrapeLog(total=N)`；结构与全量 phase-2 循环相同（TmdbAuthError 批量失败、CancelledError 停止消息、逐条异常隔离）。没有失败条目 → `?err=没有失败的条目需要重新刮削`；运行中 → `?err=任务正在运行中，请稍后`；否则 `?ok=已开始重新刮削 N 条失败条目`。仪表盘在 `counts.failed>0` 时显示「重新刮削失败项 (N)」按钮。
 
-> **API 限流**：`TmdbScraper` 内置请求级 `_RateLimiter(min_interval=tmdb_delay_seconds)`，所有 API 请求（search/detail/external_ids）在发出前 `wait()`；图片走 CDN 不限速。批量重刮失败项时该限速避免触发 429。
+> **API 限流**：`TmdbScraper` 内置请求级 `_RateLimiter(min_interval=tmdb_delay_seconds)`，**所有** TMDB 请求——API（search/detail/external_ids）与图片（CDN）下载——在发出前共享同一限速器 `wait()`，全量扫描 / 单条重刮 / 批量重刮失败项统一控速，避免触发 429。图片较多时可调低 `tmdb_delay_seconds` 提速。
 
 **GET `/libraries`（libraries.html）**：表格列＝名称/路径/类型/条目数/删除按钮；底部新增表单。
 **POST `/libraries/add`** 表单字段：`name`(必填), `path`(必填), `media_type`(select: movie|tv)。

@@ -102,7 +102,12 @@ class TmdbScraper:
         return meta
 
     async def fetch_image(self, url: str) -> bytes:
-        """Download an image from *url* and return its raw bytes."""
+        """Download an image from *url* and return its raw bytes.
+
+        Shares the same rate limiter as the API calls, so image (CDN)
+        downloads are paced by ``tmdb_delay_seconds`` too.
+        """
+        await self._limiter.wait()
         clean_url = _sanitise_url(url)
         try:
             resp = await self._image_client.get(clean_url)
