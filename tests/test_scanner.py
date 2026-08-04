@@ -1628,3 +1628,25 @@ async def test_stop_awaited_run_full(tmp_path: Path) -> None:
         item = sess.query(MediaItem).one()
         assert item.status == "failed"
         assert "任务已手动停止" in (item.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_rescrape_reparses_folder_name(tmp_path: Path) -> None:
+    """Manual rescrape re-parses the folder name instead of the stale stored title."""
+    movies_dir = tmp_path / "movies"
+    folder = "12.蚁人1(2015).Ant Man 2015 UHD BluRay REMUX 2160p HEVC Atmos TrueHD 7.1-PTer"
+    d = movies_dir / folder
+    d.mkdir(parents=True)
+    (d / "video.mkv").write_text("x")
+
+    h = _setup(tmp_path)
+    runner = h.runner; tmdb = h.tmdb
+    tmdb.search_and_fetch.return_value = _mock_meta(title="蚁人")
+    with h.session() as sess:
+        lib = _add_library(sess, "Movies", str(movies_dir), "movie")
+        # Simulate a stale parsed_title stored by an older parser version
+        item_id = _add_item(sess, lib, str(d), "12 蚁人1", 2015)
+
+    await runner.rescrape_item(item_id)
+
+    assert tmdb.search_and_fetch.await_args.args[0] == "蚁人1"

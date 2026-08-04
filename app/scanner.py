@@ -12,7 +12,7 @@ import asyncio
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
@@ -706,6 +706,15 @@ class ScanRunner:
         target = self._load_target(item_id)
         if target is None:
             raise ItemNotFoundError(f"MediaItem {item_id} 不存在")
+
+        # Re-parse the folder/file name with the current parser: the stored
+        # parsed_title can be stale (parsed by an older parser version), which
+        # would make the search fail even after a parser fix.
+        fresh = parse_folder_name(Path(target.folder_path).name)
+        if fresh.title:
+            target = replace(
+                target, parsed_title=fresh.title, parsed_year=fresh.year,
+            )
 
         log_id: int | None = None
         total = 1

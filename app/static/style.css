@@ -55,4 +55,8 @@ button:disabled { background: #95a5a6; cursor: not-allowed; }
 details { font-size: 13px; }
 details pre { background: #f8f9fa; padding: 8px; border-radius: 4px; overflow-x: auto; font-size: 12px; }
 
+.path-cell summary { cursor: pointer; color: #555; font-family: ui-monospace, Consolas, monospace; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+.path-cell summary:hover { color: #2980b9; }
+.path-full { margin-top: 4px; padding: 6px 8px; background: #f8f9fa; border-radius: 4px; font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; white-space: normal; }
+
 .info p { margin-bottom: 6px; font-size: 14px; color: #666; }

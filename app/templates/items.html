@@ -20,13 +20,19 @@
 
 <table>
 <thead>
-<tr><th>ID</th><th>识别标题</th><th>年份</th><th>类型</th><th>匹配标题</th><th>评分</th><th>状态</th><th>失败原因</th><th>操作</th></tr>
+<tr><th>ID</th><th>识别标题</th><th>原始路径</th><th>年份</th><th>类型</th><th>匹配标题</th><th>评分</th><th>状态</th><th>失败原因</th><th>操作</th></tr>
 </thead>
 <tbody>
 {% for item in items %}
 <tr>
   <td>{{ item.id }}</td>
   <td>{% if item.status == 'manual_needed' %}<span class="text-warn">{{ item.folder_path }}</span>{% else %}{{ item.parsed_title or '' }}{% endif %}</td>
+  <td>
+    <details class="path-cell">
+      <summary title="{{ item.folder_path }}">{{ item.folder_path[:50] }}{% if item.folder_path|length > 50 %}…{% endif %}</summary>
+      <div class="path-full">{{ item.folder_path }}</div>
+    </details>
+  </td>
   <td>{{ item.parsed_year or '' }}</td>
   <td>{{ item.media_type }}</td>
   <td>{{ item.matched_title or '' }}</td>
