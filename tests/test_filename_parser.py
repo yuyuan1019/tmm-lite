@@ -48,6 +48,17 @@ _PARAMS = [
     ("007：大破天幕杀机 (2012)", ParsedName("007：大破天幕杀机", 2012, None, None)),
     # M3-T18: Chinese season-count marker stripped ("[全7季]")
     ("黑镜 Black Mirror[全7季]", ParsedName("黑镜 Black Mirror", None, None, None)),
+    # M3-T19: double-dot leading index stripped ("28..奇异博士2" → title preserved)
+    ("28..奇异博士2：疯狂多元宇宙.(2022).Doctor.Strange.in.the.Multiverse.of.Madness.2022.UHD.BluRay.REMUX.2160p.HEVC.TrueHD7.1.Atmos-HDS",
+     ParsedName("奇异博士2：疯狂多元宇宙", 2022, None, None)),
+    # M3-T20: Chinese "第03季" season marker extracted + stripped from title
+    ("无耻家庭.第03季.Shameless.S03.2013.1080p.AMZN.WEB-DL.AC3.x265.10bit-Yumi@FRDS",
+     ParsedName("无耻家庭 Shameless", 2013, 3, None)),
+    # M3-T21: Chinese numeral season count "全十一季" stripped
+    ("无耻家庭.全十一季", ParsedName("无耻家庭", None, None, None)),
+    # M3-T22: double bracket "((2011)" → year extracted, no trailing "(" in title
+    ("05.美国队长1.复仇者先锋((2011).Captain America The First Avenger 2011 UHD BluRay REMUX 2160p HEVC Atmos TrueHD 7.1-PTer",
+     ParsedName("美国队长1 复仇者先锋", 2011, None, None)),
 ]
 
 

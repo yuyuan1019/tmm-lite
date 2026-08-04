@@ -116,7 +116,8 @@ _RE_DOT_UNDERSCORE = re.compile(r"[._]+")
 
 # Leftover unmatched brackets / punctuation at title boundaries after year extraction
 # ("美国队长1 复仇者先锋(" → "美国队长1 复仇者先锋")
-_RE_TRAILING_JUNK = re.compile(r"^[\s.（(（\[【]+|[\s.)）)】\]】]+$")
+# Leading: closing brackets (orphaned closers).  Trailing: opening brackets (orphaned openers).
+_RE_TRAILING_JUNK = re.compile(r"^[\s.)）\]】〕〉》]+|[\s.(（\[【〔〈《]+$")
 
 
 # ---------------------------------------------------------------------------
