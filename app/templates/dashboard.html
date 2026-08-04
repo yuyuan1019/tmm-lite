@@ -39,6 +39,11 @@
       {% if is_running %}任务运行中…{% else %}立即执行一次{% endif %}
     </button>
   </form>
+  {% if counts.failed %}
+  <form method="post" action="/rescrape-failed">
+    <button type="submit" {% if is_running %}disabled{% endif %} title="重新刮削所有失败条目（限速）">重新刮削失败项 ({{ counts.failed }})</button>
+  </form>
+  {% endif %}
   {% if is_running %}
   <form method="post" action="/stop-scrape" style="display:inline">
     <button type="submit" style="background:#c0392b;">停止</button>

@@ -1771,3 +1771,57 @@ async def test_discover_tv_episode_subfolders(tmp_path: Path) -> None:
         items = sess.query(MediaItem).all()
         assert len(items) == 1
         assert items[0].parsed_title == "黑镜 Black Mirror"
+
+
+@pytest.mark.asyncio
+async def test_rescrape_failed_reprocesses_only_failed(tmp_path: Path) -> None:
+    movies_dir = tmp_path / "movies"
+    d1 = movies_dir / "Good (2020)"
+    d1.mkdir(parents=True)
+    (d1 / "movie.mkv").write_text("x")
+    d2 = movies_dir / "Bad (2021)"
+    d2.mkdir(parents=True)
+    (d2 / "movie.mkv").write_text("x")
+
+    h = _setup(tmp_path)
+    runner = h.runner; tmdb = h.tmdb
+    tmdb.search_and_fetch.return_value = _mock_meta(title="Matched")
+    with h.session() as sess:
+        lib = _add_library(sess, "Movies", str(movies_dir), "movie")
+        good_id = _add_item(sess, lib, str(d1), "Good", 2020)
+        bad_id = _add_item(sess, lib, str(d2), "Bad", 2021)
+        sess.get(MediaItem, good_id).status = "matched"
+        sess.get(MediaItem, bad_id).status = "failed"
+        sess.commit()
+
+    tmdb.search_and_fetch.reset_mock()
+    log = await runner.rescrape_failed()
+
+    assert log.total == 1
+    assert log.matched == 1
+    # Only the failed item was re-scraped
+    assert tmdb.search_and_fetch.await_args.args[0] == "Bad"
+    with h.session() as sess:
+        assert sess.get(MediaItem, good_id).status == "matched"
+        assert sess.get(MediaItem, bad_id).status == "matched"
+
+
+@pytest.mark.asyncio
+async def test_rescrape_failed_no_failed_items(tmp_path: Path) -> None:
+    movies_dir = tmp_path / "movies"
+    d1 = movies_dir / "Good (2020)"
+    d1.mkdir(parents=True)
+    (d1 / "movie.mkv").write_text("x")
+
+    h = _setup(tmp_path)
+    runner = h.runner; tmdb = h.tmdb
+    tmdb.search_and_fetch.return_value = _mock_meta()
+    with h.session() as sess:
+        lib = _add_library(sess, "Movies", str(movies_dir), "movie")
+        _add_item(sess, lib, str(d1), "Good", 2020)
+
+    log = await runner.rescrape_failed()
+
+    assert log.total == 0
+    assert log.matched == 0
+    tmdb.search_and_fetch.assert_not_awaited()

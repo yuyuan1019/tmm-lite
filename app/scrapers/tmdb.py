@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from pathlib import Path
 
 import httpx
@@ -25,6 +26,26 @@ BASE_URL = "https://api.themoviedb.org/3"
 IMAGE_BASE = "https://image.tmdb.org/t/p/original"
 
 
+class _RateLimiter:
+    """Async rate limiter enforcing a minimum interval between API calls."""
+
+    def __init__(self, min_interval: float) -> None:
+        self._min = max(0.0, min_interval)
+        self._last: float = 0.0  # monotonic
+        self._lock = asyncio.Lock()
+
+    async def wait(self) -> None:
+        """Block until the minimum interval since the last call has elapsed."""
+        if self._min <= 0:
+            return
+        async with self._lock:
+            now = time.monotonic()
+            delta = self._last + self._min - now
+            if delta > 0:
+                await asyncio.sleep(delta)
+            self._last = time.monotonic()
+
+
 class TmdbScraper:
     """Async TMDB API client.
 
@@ -36,12 +57,17 @@ class TmdbScraper:
     """
 
     def __init__(
-        self, api_key: str, language: str = "zh-CN", proxy: str | None = None,
+        self,
+        api_key: str,
+        language: str = "zh-CN",
+        proxy: str | None = None,
+        min_interval: float = 0.0,
     ) -> None:
         self._api_key = api_key
         self._language = language
         proxy = proxy or None
         self._proxy = proxy
+        self._limiter = _RateLimiter(min_interval)
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(15.0), proxy=proxy,
         )
@@ -183,6 +209,7 @@ class TmdbScraper:
         last_status: int | None = None
 
         for attempt in range(max_attempts):
+            await self._limiter.wait()
             try:
                 resp = await self._client.get(
                     f"{BASE_URL}{endpoint}", params=params,

@@ -317,6 +317,7 @@ class ScanRunner:
 
     async def run_full(self) -> ScrapeLog          # 全量：定时任务与"立即执行"共用
     def start_full_background(self) -> asyncio.Task[ScrapeLog]
+    def start_rescrape_failed_background(self) -> asyncio.Task[ScrapeLog]  # 一键重刮失败项
     def stop(self) -> bool                         # 请求停止：置标志 + task.cancel()，同步不阻塞
     async def rescrape_item(self, item_id: int) -> MediaItem   # 单条目，强制覆盖 NFO
     async def download_subtitle(self, item_id: int) -> Path | None  # 单条目手动字幕
@@ -425,6 +426,7 @@ class ScrapeScheduler:
 | POST `/run-scrape` | 后台启动全量任务（不阻塞请求） | 303 重定向回 `/` 带成功 flash | 任务运行中 → 303 + "任务运行中"提示（不报 500） |
 | GET `/libraries` | 库列表 + 各库条目数 | 200 | — |
 | POST `/stop-scrape` | 请求停止当前扫描 | 303 回 `/` | 运行中 → 成功提示；空闲 → 错误提示 |
+| POST `/rescrape-failed` | 一键重刮失败项（后台，限速） | 303 回 `/` | 无失败 → 提示；运行中 → 提示；否则开始 |
 | POST `/libraries/add` | 新增库 | 303 回列表 | path 非绝对/重复/为空、类型非法或任务运行中 → 303 + 错误提示 |
 | POST `/libraries/{id}/delete` | 删库（级联删条目，不动磁盘） | 303 | id 不存在 → 404 |
 | GET `/items` | 条目表格，支持 `?status=` 过滤 | 200 | — |

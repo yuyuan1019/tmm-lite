@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from pathlib import Path
 
 import httpx
@@ -362,3 +364,29 @@ async def test_imdb_id_from_external_ids_fallback(tmdb: TmdbScraper) -> None:
 
     assert result is not None
     assert result.imdb_id == "tt0816692"
+
+
+# ---------------------------------------------------------------------------
+# Rate limiter (tmdb_delay_seconds)
+# ---------------------------------------------------------------------------
+def test_rate_limiter_throttles() -> None:
+    from app.scrapers.tmdb import _RateLimiter
+
+    limiter = _RateLimiter(0.1)
+
+    async def _two_back_to_back() -> None:
+        await limiter.wait()
+        await limiter.wait()
+
+    start = time.monotonic()
+    asyncio.run(_two_back_to_back())
+    assert time.monotonic() - start >= 0.09
+
+
+def test_rate_limiter_zero_is_noop() -> None:
+    from app.scrapers.tmdb import _RateLimiter
+
+    limiter = _RateLimiter(0.0)
+    start = time.monotonic()
+    asyncio.run(limiter.wait())
+    assert time.monotonic() - start < 0.05

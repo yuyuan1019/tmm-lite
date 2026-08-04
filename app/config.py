@@ -88,6 +88,7 @@ class AppConfig:
     tmdb_api_key: str = ""
     use_douban: bool = True
     douban_delay_seconds: float = 2.0
+    tmdb_delay_seconds: float = 0.5  # min interval between TMDB API requests
     overwrite_existing_nfo: bool = False
     language: str = "zh-CN"
     schedule_cron: str = "0 4 * * *"
@@ -113,6 +114,7 @@ _ALLOWED_SAVE_KEYS = frozenset({
     "tmdb_api_key",
     "use_douban",
     "douban_delay_seconds",
+    "tmdb_delay_seconds",
     "overwrite_existing_nfo",
     "language",
     "schedule_cron",
@@ -131,6 +133,7 @@ _DEFAULTS: dict[str, object] = {
     "tmdb_api_key": "",
     "use_douban": True,
     "douban_delay_seconds": 2.0,
+    "tmdb_delay_seconds": 0.5,
     "overwrite_existing_nfo": False,
     "language": "zh-CN",
     "schedule_cron": "0 4 * * *",
@@ -155,6 +158,21 @@ def _validate_delay(value: object) -> float:
         raise ConfigError(f"豆瓣请求间隔必须是有限数字: {value}")
     if f < 0.5:
         raise ConfigError(f"豆瓣请求间隔必须 >= 0.5 秒: {value}")
+    return f
+
+
+def _validate_tmdb_delay(value: object) -> float:
+    """Return *value* as a float, raising ConfigError on NaN/Inf or < 0."""
+    import math
+
+    try:
+        f = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"TMDB 请求间隔必须是数字: {value}") from exc
+    if not math.isfinite(f):
+        raise ConfigError(f"TMDB 请求间隔必须是有限数字: {value}")
+    if f < 0:
+        raise ConfigError(f"TMDB 请求间隔必须 >= 0 秒: {value}")
     return f
 
 
@@ -189,6 +207,8 @@ def _validate_config_values(raw: dict[str, object]) -> None:
                 raise ConfigError(f"use_douban 必须是布尔值: {type(value).__name__}")
         elif key == "douban_delay_seconds":
             _validate_delay(value)
+        elif key == "tmdb_delay_seconds":
+            _validate_tmdb_delay(value)
         elif key == "overwrite_existing_nfo":
             if not isinstance(value, bool):
                 raise ConfigError(f"overwrite_existing_nfo 必须是布尔值: {type(value).__name__}")
@@ -262,6 +282,7 @@ def load_config(path: Path | None = None) -> AppConfig:
     # Identify unknown keys
     known_keys = {
         "tmdb_api_key", "use_douban", "douban_delay_seconds",
+        "tmdb_delay_seconds",
         "overwrite_existing_nfo", "language", "schedule_cron", "libraries",
         "subtitle_enabled", "opensubtitles_api_key", "subtitle_languages",
         "browse_root", "proxy",
@@ -272,6 +293,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         tmdb_api_key=str(raw.get("tmdb_api_key", _DEFAULTS["tmdb_api_key"])),
         use_douban=bool(raw.get("use_douban", _DEFAULTS["use_douban"])),
         douban_delay_seconds=float(raw.get("douban_delay_seconds", _DEFAULTS["douban_delay_seconds"])),  # type: ignore[arg-type]
+        tmdb_delay_seconds=float(raw.get("tmdb_delay_seconds", _DEFAULTS["tmdb_delay_seconds"])),  # type: ignore[arg-type]
         overwrite_existing_nfo=bool(raw.get("overwrite_existing_nfo", _DEFAULTS["overwrite_existing_nfo"])),
         language=str(raw.get("language", _DEFAULTS["language"])),
         schedule_cron=str(raw.get("schedule_cron", _DEFAULTS["schedule_cron"])),
@@ -336,6 +358,7 @@ def save_config(updates: dict[str, object], path: Path | None = None) -> AppConf
         "tmdb_api_key": existing.tmdb_api_key,
         "use_douban": existing.use_douban,
         "douban_delay_seconds": existing.douban_delay_seconds,
+        "tmdb_delay_seconds": existing.tmdb_delay_seconds,
         "overwrite_existing_nfo": existing.overwrite_existing_nfo,
         "language": existing.language,
         "schedule_cron": existing.schedule_cron,

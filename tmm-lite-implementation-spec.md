@@ -138,6 +138,7 @@ def get_data_dir() -> Path:
 | `tmdb_api_key` | str | `""` | 无（空表示回退环境变量） |
 | `use_douban` | bool | `true` | — |
 | `douban_delay_seconds` | float | `2.0` | 必须有限且 ≥ 0.5；NaN/正负无穷均拒绝 |
+| `tmdb_delay_seconds` | float | `0.5` | TMDB API 请求最小间隔，必须有限且 ≥ 0；0=不限速 |
 | `overwrite_existing_nfo` | bool | `false` | — |
 | `language` | str | `"zh-CN"` | 非空 |
 | `schedule_cron` | str | `"0 4 * * *"` | 必须恰好 5 段，且 `CronTrigger.from_crontab()` 可解析 |
@@ -592,6 +593,7 @@ class ScanRunner:
                  tmdb: TmdbScraper, douban: DoubanScraper | None): ...
     async def run_full(self) -> ScrapeLog: ...
     def start_full_background(self) -> asyncio.Task[ScrapeLog]: ...
+    def start_rescrape_failed_background(self) -> asyncio.Task[ScrapeLog]: ...
     def stop(self) -> bool: ...
     async def rescrape_item(self, item_id: int) -> MediaItem: ...
     async def _scrape_one(self, target: ScrapeTarget, *, force: bool) -> ScrapeResult: ...
@@ -852,6 +854,10 @@ redirect("/?ok=任务已启动")
 ```
 
 **POST `/stop-scrape`**（停止）：`runner.stop()` 为同步方法——仅置 `_stop_requested=True` 并 `task.cancel()`，不等待，故不会与扫描任务死锁。空闲 → `?err=当前没有正在运行的任务`；运行中 → `?ok=已请求停止，剩余条目将标记为已取消`。任务被取消时，`_run_full_impl` 的 `CancelledError` 分支把剩余条目置 failed，消息区分来源：`_stop_requested` 为真 → `任务已手动停止`，否则（应用关闭走 `shutdown()` 取消）→ `任务因应用关闭而取消`。互斥由任务 done-callback 释放（后台任务因 callback 不在任务上下文，`_done` 里显式清 `_current_task`），停止后 `is_running=False` 即可再起新扫描。
+
+**POST `/rescrape-failed`**（一键重刮失败项）：后台执行 `_rescrape_failed_impl()`——只加载 `status='failed'` 的条目逐条 `_scrape_one(force=True)`，写一条 `ScrapeLog(total=N)`；结构与全量 phase-2 循环相同（TmdbAuthError 批量失败、CancelledError 停止消息、逐条异常隔离）。没有失败条目 → `?err=没有失败的条目需要重新刮削`；运行中 → `?err=任务正在运行中，请稍后`；否则 `?ok=已开始重新刮削 N 条失败条目`。仪表盘在 `counts.failed>0` 时显示「重新刮削失败项 (N)」按钮。
+
+> **API 限流**：`TmdbScraper` 内置请求级 `_RateLimiter(min_interval=tmdb_delay_seconds)`，所有 API 请求（search/detail/external_ids）在发出前 `wait()`；图片走 CDN 不限速。批量重刮失败项时该限速避免触发 429。
 
 **GET `/libraries`（libraries.html）**：表格列＝名称/路径/类型/条目数/删除按钮；底部新增表单。
 **POST `/libraries/add`** 表单字段：`name`(必填), `path`(必填), `media_type`(select: movie|tv)。

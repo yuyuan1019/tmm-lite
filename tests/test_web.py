@@ -98,6 +98,12 @@ def test_stop_scrape_idle(client: TestClient) -> None:
     assert "没有正在运行" in unquote(resp.headers.get("location", ""))
 
 
+def test_rescrape_failed_no_failed_items(client: TestClient) -> None:
+    resp = client.post("/rescrape-failed", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "没有失败的条目" in unquote(resp.headers.get("location", ""))
+
+
 # ---------------------------------------------------------------------------
 # M9-T4: rescrape
 # ---------------------------------------------------------------------------

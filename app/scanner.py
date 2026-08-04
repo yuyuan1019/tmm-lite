@@ -12,9 +12,11 @@ import asyncio
 import logging
 import os
 import re
+from collections.abc import Coroutine
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
@@ -455,9 +457,22 @@ class ScanRunner:
 
     def start_full_background(self) -> asyncio.Task[ScrapeLog]:
         """Start a full scan in the background; returns the Task immediately."""
+        return self._start_background(self._run_full_impl())
+
+    def start_rescrape_failed_background(self) -> asyncio.Task[ScrapeLog]:
+        """Start a background run that re-scrapes all failed items."""
+        return self._start_background(self._rescrape_failed_impl())
+
+    def _start_background(
+        self, coro: Coroutine[Any, Any, ScrapeLog],
+    ) -> asyncio.Task[ScrapeLog]:
+        """Claim the mutex and run *coro* as a background task.
+
+        The mutex is released by the done-callback once the task unwinds.
+        """
         self._claim()
         try:
-            task = asyncio.create_task(self._run_full_impl())
+            task = asyncio.create_task(coro)
             self._current_task = task
 
             def _done(t: asyncio.Task[object]) -> None:
@@ -475,6 +490,14 @@ class ScanRunner:
         except Exception:
             self._release()
             raise
+
+    async def rescrape_failed(self) -> ScrapeLog:
+        """Re-scrape all items in ``failed`` status (awaited form)."""
+        self._claim()
+        try:
+            return await self._rescrape_failed_impl()
+        finally:
+            self._release()
 
     def stop(self) -> bool:
         """Gracefully stop a running scan (used by the web "停止" button).
@@ -788,6 +811,103 @@ class ScanRunner:
             if item is None:
                 raise RuntimeError(f"MediaItem {item_id} disappeared after rescrape")
             return item
+
+    # ------------------------------------------------------------------
+    # Re-scrape all failed items
+    # ------------------------------------------------------------------
+
+    async def _rescrape_failed_impl(self) -> ScrapeLog:
+        """Re-scrape every item in ``failed`` status (one-click action).
+
+        Mirrors the per-item loop of a full scan but is scoped to ``failed``
+        items only.  TMDB request frequency is throttled by the scraper's rate
+        limiter (``tmdb_delay_seconds``).
+        """
+        with self._session_factory() as sess:
+            ids = list(sess.execute(
+                select(MediaItem.id).where(MediaItem.status == "failed")
+            ).scalars().all())
+
+        log_id: int | None = None
+        total = len(ids)
+        matched = 0
+        failed = 0
+        detail_lines: list[str] = []
+
+        with self._session_factory.begin() as sess:
+            log = ScrapeLog(
+                started_at=datetime.now(UTC),
+                total=total, matched=0, failed=0,
+            )
+            sess.add(log)
+            sess.flush()
+            log_id = log.id
+
+        for index, item_id in enumerate(ids):
+            target = self._load_target(item_id)
+            if target is None:
+                continue
+            conn = _library_connection_from_target(target, self._enc_key)
+            try:
+                result = await self._scrape_one(target, force=True, conn=conn)
+                with self._session_factory.begin() as sess:
+                    _persist_result(sess, target.id, result)
+                matched += 1
+            except TmdbAuthError as exc:
+                remaining = ids[index:]
+                with self._session_factory.begin() as sess:
+                    sess.execute(
+                        update(MediaItem)
+                        .where(MediaItem.id.in_(remaining))
+                        .values(status="failed", error_message=str(exc))
+                    )
+                failed += len(remaining)
+                for rid in remaining:
+                    t = self._load_target(rid)
+                    if t:
+                        detail_lines.append(f"{t.folder_path}: {exc}")
+                break  # Stop sending requests
+            except asyncio.CancelledError:
+                stop_msg = "任务已手动停止" if self._stop_requested else "任务因应用关闭而取消"
+                remaining = ids[index:]
+                with self._session_factory.begin() as sess:
+                    sess.execute(
+                        update(MediaItem)
+                        .where(MediaItem.id.in_(remaining))
+                        .values(status="failed", error_message=stop_msg)
+                    )
+                failed += len(remaining)
+                for rid in remaining:
+                    t = self._load_target(rid)
+                    if t:
+                        detail_lines.append(f"{t.folder_path}: {stop_msg}")
+                raise
+            except Exception as exc:  # noqa: BLE001 (item isolation — failure must not abort batch)
+                with self._session_factory.begin() as sess:
+                    item = sess.get(MediaItem, item_id)
+                    if item is not None:
+                        item.status = "failed"
+                        item.error_message = str(exc)
+                failed += 1
+                detail_lines.append(f"{target.folder_path}: {exc}")
+            finally:
+                await conn.aclose()
+
+        if log_id is not None:
+            with self._session_factory.begin() as sess:
+                existing_log = sess.get(ScrapeLog, log_id)
+                if existing_log is not None:
+                    existing_log.finished_at = datetime.now(UTC)
+                    existing_log.total = total
+                    existing_log.matched = matched
+                    existing_log.failed = failed
+                    existing_log.detail = "\n".join(detail_lines) if detail_lines else None
+
+        with self._session_factory() as sess:
+            final_log = sess.get(ScrapeLog, log_id)
+            if final_log is None:
+                raise RuntimeError(f"ScrapeLog {log_id} not found after finalise")
+            return final_log
 
     # ------------------------------------------------------------------
     # Single item subtitle download

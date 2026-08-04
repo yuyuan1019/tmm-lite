@@ -293,6 +293,7 @@ Web 页面对某一行点击"重新刮削"，只对该条目重复步骤 7.1 第
 | GET | `/` | 仪表盘页面 |
 | POST | `/run-scrape` | 手动触发一次全量扫描+刮削（任务运行中时返回拒绝提示） |
 | POST | `/stop-scrape` | 请求停止当前运行的扫描（空闲时返回错误提示） |
+| POST | `/rescrape-failed` | 一键重新刮削所有失败条目（后台，限速） |
 | GET | `/libraries` | 媒体库列表页 |
 | POST | `/libraries/add` | 新增媒体库（表单：name, path, media_type） |
 | POST | `/libraries/{id}/delete` | 删除媒体库（不删磁盘文件） |

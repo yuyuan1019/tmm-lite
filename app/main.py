@@ -102,7 +102,10 @@ def create_app(
         _run_seed_import(session_factory, config)
 
         # Scrapers
-        tmdb = TmdbScraper(config.effective_tmdb_api_key, config.language, config.proxy)
+        tmdb = TmdbScraper(
+            config.effective_tmdb_api_key, config.language, config.proxy,
+            min_interval=config.tmdb_delay_seconds,
+        )
         douban = DoubanScraper(config.douban_delay_seconds) if config.use_douban else None
 
         # Encryption key (for connection credentials)
@@ -248,6 +251,30 @@ def create_app(
         if runner.stop():
             return _redirect("/", ok="已请求停止，剩余条目将标记为已取消")
         return _redirect("/", err="当前没有正在运行的任务")
+
+    # ------------------------------------------------------------------
+    # POST /rescrape-failed
+    # ------------------------------------------------------------------
+
+    @app.post("/rescrape-failed")
+    async def rescrape_failed(request: Request) -> Any:
+        """Re-scrape all failed items in the background (rate-limited)."""
+        runner: ScanRunner = request.app.state.runner
+        sess = request.app.state.session_factory()
+        try:
+            failed_count = sess.execute(
+                select(func.count(MediaItem.id)).where(MediaItem.status == "failed")
+            ).scalar_one()
+        finally:
+            sess.close()
+
+        if failed_count == 0:
+            return _redirect("/", err="没有失败的条目需要重新刮削")
+        try:
+            runner.start_rescrape_failed_background()
+        except ScanBusyError:
+            return _redirect("/", err="任务正在运行中，请稍后")
+        return _redirect("/", ok=f"已开始重新刮削 {failed_count} 条失败条目")
 
     # ------------------------------------------------------------------
     # GET /libraries
@@ -573,6 +600,7 @@ def create_app(
         clear_key = form.get("clear_tmdb_api_key") == "on"
         use_douban = form.get("use_douban") == "on"
         delay_str = str(form.get("douban_delay_seconds", "2.0"))
+        tmdb_delay_str = str(form.get("tmdb_delay_seconds", "0.5"))
         overwrite = form.get("overwrite_existing_nfo") == "on"
         cron_str = str(form.get("schedule_cron", "0 4 * * *"))
         subtitle_enabled = form.get("subtitle_enabled") == "on"
@@ -600,10 +628,19 @@ def create_app(
             if not math.isfinite(delay) or delay < 0.5:
                 return _redirect("/settings", err="豆瓣请求间隔必须 >= 0.5 秒")
 
+            # Validate TMDB request interval
+            try:
+                tmdb_delay = float(tmdb_delay_str)
+            except (ValueError, TypeError):
+                return _redirect("/settings", err="TMDB 请求间隔必须是数字")
+            if not math.isfinite(tmdb_delay) or tmdb_delay < 0:
+                return _redirect("/settings", err="TMDB 请求间隔必须 >= 0 秒")
+
             # Build updates — empty password fields mean "don't change existing key"
             updates: dict[str, object] = {
                 "use_douban": use_douban,
                 "douban_delay_seconds": delay,
+                "tmdb_delay_seconds": tmdb_delay,
                 "overwrite_existing_nfo": overwrite,
                 "schedule_cron": cron_str,
                 "subtitle_enabled": subtitle_enabled,
@@ -628,7 +665,10 @@ def create_app(
                 return _redirect("/settings", err=str(exc))
 
             # Prepare new scrapers
-            new_tmdb = TmdbScraper(new_config.effective_tmdb_api_key, new_config.language, new_config.proxy)
+            new_tmdb = TmdbScraper(
+                new_config.effective_tmdb_api_key, new_config.language, new_config.proxy,
+                min_interval=new_config.tmdb_delay_seconds,
+            )
             new_douban = DoubanScraper(new_config.douban_delay_seconds) if new_config.use_douban else None
 
             # Apply to running objects (commit point)
@@ -652,6 +692,7 @@ def create_app(
                     "tmdb_api_key": old_config.tmdb_api_key,
                     "use_douban": old_config.use_douban,
                     "douban_delay_seconds": old_config.douban_delay_seconds,
+                    "tmdb_delay_seconds": old_config.tmdb_delay_seconds,
                     "overwrite_existing_nfo": old_config.overwrite_existing_nfo,
                     "schedule_cron": old_cron,
                     "language": old_config.language,

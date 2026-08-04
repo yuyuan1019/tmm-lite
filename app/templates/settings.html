@@ -12,6 +12,11 @@
     <label>
       <input type="checkbox" name="clear_tmdb_api_key"> 清除已保存 Key（恢复环境变量回退）
     </label>
+    <label>
+      TMDB 请求间隔（秒）：
+      <input type="number" name="tmdb_delay_seconds" step="0.1" min="0" value="{{ config.tmdb_delay_seconds }}">
+    </label>
+    <p><small>两次 TMDB API 请求的最小间隔。批量刮削/重刮失败项时建议 ≥ 0.5 秒，避免触发限流（429）。0 = 不限速。</small></p>
   </fieldset>
 
   <fieldset>
