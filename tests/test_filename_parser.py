@@ -37,6 +37,15 @@ _PARAMS = [
     ("国语中字.某电影.2020.WEB-DL", ParsedName("某电影", 2020, None, None)),
     # M3-T13: full combo: title + year + season + episode
     ("繁花.2023.S01E01.mkv", ParsedName("繁花", 2023, 1, 1)),
+    # M3-T14: leading collection index "14." stripped (Chinese title follows)
+    ("14.奇异博士1(2016).Doctor Strange 2016 UHD BluRay REMUX 2160p HEVC Atmos TrueHD 7.1-PTer",
+     ParsedName("奇异博士1", 2016, None, None)),
+    # M3-T15: leading index with underscore separator
+    ("12_三国演义 (1994)", ParsedName("三国演义", 1994, None, None)),
+    # M3-T16: Latin title keeps leading number (not an index)
+    ("50.First.Dates (2004)", ParsedName("50 First Dates", 2004, None, None)),
+    # M3-T17: "007" prefix kept (colon separator, not an index)
+    ("007：大破天幕杀机 (2012)", ParsedName("007：大破天幕杀机", 2012, None, None)),
 ]
 
 

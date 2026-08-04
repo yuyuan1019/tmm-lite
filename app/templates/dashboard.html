@@ -39,6 +39,11 @@
       {% if is_running %}任务运行中…{% else %}立即执行一次{% endif %}
     </button>
   </form>
+  {% if is_running %}
+  <form method="post" action="/stop-scrape" style="display:inline">
+    <button type="submit" style="background:#c0392b;">停止</button>
+  </form>
+  {% endif %}
   <span class="status-text">状态：{% if is_running %}运行中{% else %}空闲{% endif %}</span>
 </div>
 

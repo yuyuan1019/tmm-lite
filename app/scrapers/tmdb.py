@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 
 import httpx
@@ -123,38 +124,34 @@ class TmdbScraper:
     async def _search(
         self, title: str, year: int | None, media_type: str,
     ) -> int | None:
-        """Search TMDB; return the first result's id, or None."""
-        if media_type == "movie":
-            endpoint = "/search/movie"
-            params = self._params(query=title)
-            if year is not None:
-                params["year"] = year
-            year_param_name = "year"
-        else:
-            endpoint = "/search/tv"
-            params = self._params(query=title)
-            if year is not None:
-                params["first_air_date_year"] = year
-            year_param_name = "first_air_date_year"
+        """Search TMDB; return the first result's id, or None.
 
-        # First attempt (with year if provided)
-        data = await self._get_json(endpoint, params)
-        results = data.get("results", [])
-        if isinstance(results, list) and results:
-            first = results[0]
-            if isinstance(first, dict):
-                return int(first["id"])  # type: ignore[arg-type]
+        Multiple candidate queries are tried from most to least specific: the
+        exact title, then the title with a trailing Chinese sequence number
+        stripped ("奇异博士1" → "奇异博士", since TMDB titles omit the "1").
+        Each query is tried with the year filter first, then without it.
+        """
+        endpoint = "/search/movie" if media_type == "movie" else "/search/tv"
+        year_param_name = "year" if media_type == "movie" else "first_air_date_year"
 
-        # Fallback: retry without year (if year was provided)
-        if year is not None:
-            params.pop(year_param_name, None)
-            data = await self._get_json(endpoint, params)
-            results = data.get("results", [])
-            if isinstance(results, list) and results:
-                first = results[0]
-                if isinstance(first, dict):
-                    return int(first["id"])  # type: ignore[arg-type]
+        candidates = [title]
+        stripped = _strip_cjk_sequence_number(title)
+        if stripped and stripped != title:
+            candidates.append(stripped)
 
+        years = [year, None] if year is not None else [None]
+
+        for query in candidates:
+            for y in years:
+                params = self._params(query=query)
+                if y is not None:
+                    params[year_param_name] = y
+                data = await self._get_json(endpoint, params)
+                results = data.get("results", [])
+                if isinstance(results, list) and results:
+                    first = results[0]
+                    if isinstance(first, dict):
+                        return int(first["id"])  # type: ignore[arg-type]
         return None
 
     async def _detail(self, item_id: int, media_type: str) -> dict[str, object]:
@@ -270,6 +267,17 @@ class TmdbScraper:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _strip_cjk_sequence_number(title: str) -> str:
+    """Strip a trailing sequence number from a Chinese title.
+
+    e.g. ``"奇异博士1"`` → ``"奇异博士"`` (TMDB titles omit the ``"1"``).
+    Only matches a digit-run immediately after a CJK character, so English
+    titles and titles like ``"猎杀T34"`` are left unchanged.
+    """
+    m = re.match(r"^(.*[一-鿿])(\d+)$", title.strip())
+    return m.group(1) if m else title
 
 
 def _parse_retry_after(header: str | None) -> float:

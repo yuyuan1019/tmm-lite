@@ -92,6 +92,13 @@ _RE_RELEASE_GROUP = re.compile(
     r"-(?=[A-Z0-9])[^-]*[A-Z][A-Z0-9]*$"
 )
 
+# Leading collection index in Chinese media naming: "14.奇异博士1" -> "奇异博士1".
+# Matches digits + separator ONLY when the following title starts with a CJK
+# character, so "50.First.Dates" (Latin) and "2012" (no separator) are untouched.
+_RE_LEADING_INDEX = re.compile(
+    r"^\d{1,4}[.．、_]\s*(?=[一-鿿])"
+)
+
 # Brackets containing noise (【】or [])
 _RE_SQUARE_BRACKET = re.compile(r"【[^】]*】|\[[^\]]*\]")
 
@@ -226,10 +233,13 @@ def _remove_patterns(text: str, patterns: list[str]) -> str:
 
 def _clean_title(region: str) -> str | None:
     """Clean a title region string, returning None if nothing remains."""
-    # Step 7a: remove release group suffix
+    # Step 7a: drop a leading collection index ("14.奇异博士1" -> "奇异博士1")
+    region = _RE_LEADING_INDEX.sub("", region, count=1)
+
+    # Step 7b: remove release group suffix
     region = _RE_RELEASE_GROUP.sub("", region)
 
-    # Step 7b: handle square brackets
+    # Step 7c: handle square brackets
     # Check if bracket content matches a noise word → remove brackets + content
     # Otherwise strip brackets keeping content
     def _handle_bracket(m: re.Match[str]) -> str:
@@ -241,13 +251,13 @@ def _clean_title(region: str) -> str | None:
 
     region = _RE_SQUARE_BRACKET.sub(_handle_bracket, region)
 
-    # Step 7c: remove noise words (longest-first, case-insensitive, boundary-aware)
+    # Step 7d: remove noise words (longest-first, case-insensitive, boundary-aware)
     for word in _NOISE_SORTED:
         # Build a pattern that requires word boundaries on both sides
         # Boundary = start/end of string or any non-alnum, non-CJK char
         region = _replace_noise_word(region, word)
 
-    # Step 7d: replace dots and underscores with spaces, collapse whitespace, strip
+    # Step 7e: replace dots and underscores with spaces, collapse whitespace, strip
     region = _RE_DOT_UNDERSCORE.sub(" ", region)
     # Collapse multiple whitespace
     region = re.sub(r"\s+", " ", region).strip()

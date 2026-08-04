@@ -23,7 +23,7 @@ from app import VIDEO_EXTENSIONS
 from app.config import AppConfig
 from app.connection import Connection, ConnectionConfig, LocalConnection, create_connection
 from app.crypto import decrypt_dict
-from app.database import Library, MediaItem, ScrapeLog
+from app.database import AppMeta, Library, MediaItem, ScrapeLog
 from app.exceptions import (
     ItemNotFoundError,
     ScanBusyError,
@@ -366,6 +366,7 @@ class ScanRunner:
         self._running = False
         self._accepting = True
         self._current_task: asyncio.Task[object] | None = None
+        self._stop_requested = False
 
     # ------------------------------------------------------------------
     # Concurrency control
@@ -379,6 +380,7 @@ class ScanRunner:
             raise ScanBusyError("任务正在运行中，请稍后")
         self._running = True
         self._current_task = asyncio.current_task()
+        self._stop_requested = False
 
     def _release(self) -> None:
         """Release the internal mutex."""
@@ -435,6 +437,9 @@ class ScanRunner:
 
             def _done(t: asyncio.Task[object]) -> None:
                 self._release()
+                # Done-callbacks run outside the scan task's context, so
+                # _release() cannot clear _current_task itself — do it here.
+                self._current_task = None
                 if not t.cancelled():
                     exc = t.exception()
                     if exc is not None:
@@ -445,6 +450,28 @@ class ScanRunner:
         except Exception:
             self._release()
             raise
+
+    def stop(self) -> bool:
+        """Gracefully stop a running scan (used by the web "停止" button).
+
+        Cancels the current scan task; remaining queued items are marked
+        ``failed`` with a manual-stop message.  Returns ``True`` when a scan
+        was running and a stop was requested, ``False`` when idle.
+
+        Concurrency: this is a plain sync call — it only sets a flag and
+        schedules the cancellation, so it cannot deadlock with the scan task.
+        The mutex is released by the task's done-callback once the task
+        actually unwinds, at which point ``is_running`` goes ``False`` and a
+        new scan may start.
+        """
+        if not self._running:
+            return False
+        task = self._current_task
+        if task is None or task.done():
+            return False
+        self._stop_requested = True
+        task.cancel()
+        return True
 
     async def rescrape_item(self, item_id: int) -> MediaItem:
         """Force re-scrape a single item (ignores existing NFO)."""
@@ -518,6 +545,12 @@ class ScanRunner:
                 conn = _library_connection(lib, self._enc_key)
                 try:
                     found = await _discover_folders(conn, lib)
+                    # Skip paths the user deleted from the list (record only —
+                    # files on disk are untouched and re-added on un-ignore).
+                    with self._session_factory() as sess:
+                        ignored = _ignored_paths(sess)
+                    if ignored:
+                        found = {p for p in found if p not in ignored}
                     # Pre-compute NFO existence for discovered folders
                     nfo_map: dict[str, bool] = {}
                     for fpath in found:
@@ -614,6 +647,7 @@ class ScanRunner:
                             detail_lines.append(f"{t.folder_path}: {exc}")
                     break  # Stop sending requests
                 except asyncio.CancelledError:
+                    stop_msg = "任务已手动停止" if self._stop_requested else "任务因应用关闭而取消"
                     remaining = api_queue_ids[index:]
                     with self._session_factory.begin() as sess:
                         sess.execute(
@@ -621,14 +655,14 @@ class ScanRunner:
                             .where(MediaItem.id.in_(remaining))
                             .values(
                                 status="failed",
-                                error_message="任务因应用关闭而取消",
+                                error_message=stop_msg,
                             )
                         )
                     failed += len(remaining)
                     for rid in remaining:
                         t = self._load_target(rid)
                         if t:
-                            detail_lines.append(f"{t.folder_path}: 任务取消")
+                            detail_lines.append(f"{t.folder_path}: {stop_msg}")
                     raise
                 except Exception as exc:  # noqa: BLE001 (item isolation — failure must not abort batch)
                     with self._session_factory.begin() as sess:
@@ -1037,6 +1071,30 @@ def _mark_missing(
         lib_found = found_paths.get(item.library_id, set())
         if normalize_path(item.folder_path) not in lib_found:
             item.status = "missing"
+
+
+# ---------------------------------------------------------------------------
+# Ignored (deleted) item paths
+# ---------------------------------------------------------------------------
+
+_IGNORED_META_KEY = "ignored_paths"
+
+
+def _ignored_paths(sess: Session) -> set[str]:
+    """Return the set of normalized paths the user deleted (record-only)."""
+    meta = sess.get(AppMeta, _IGNORED_META_KEY)
+    if meta is None:
+        return set()
+    return {p for p in meta.value.splitlines() if p}
+
+
+def _set_ignored_paths(sess: Session, paths: set[str]) -> None:
+    """Persist the ignored-path set under AppMeta (newline-separated)."""
+    meta = sess.get(AppMeta, _IGNORED_META_KEY)
+    if meta is None:
+        meta = AppMeta(key=_IGNORED_META_KEY, value="")
+        sess.add(meta)
+    meta.value = "\n".join(sorted(paths))
 
 
 def _persist_result(

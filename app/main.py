@@ -38,7 +38,7 @@ from app.exceptions import (
     ScanBusyError,
     ScrapeError,
 )
-from app.scanner import ScanRunner, normalize_path
+from app.scanner import ScanRunner, _ignored_paths, _set_ignored_paths, normalize_path
 from app.scheduler import ScrapeScheduler
 from app.scrapers.douban import DoubanScraper
 from app.scrapers.subtitle import SubtitleDownloader
@@ -238,6 +238,18 @@ def create_app(
         return _redirect("/", ok="任务已启动")
 
     # ------------------------------------------------------------------
+    # POST /stop-scrape
+    # ------------------------------------------------------------------
+
+    @app.post("/stop-scrape")
+    async def stop_scrape(request: Request) -> Any:
+        """Request a graceful stop of the running scan (if any)."""
+        runner: ScanRunner = request.app.state.runner
+        if runner.stop():
+            return _redirect("/", ok="已请求停止，剩余条目将标记为已取消")
+        return _redirect("/", err="当前没有正在运行的任务")
+
+    # ------------------------------------------------------------------
     # GET /libraries
     # ------------------------------------------------------------------
 
@@ -399,6 +411,8 @@ def create_app(
                     select(func.count(MediaItem.id)).where(MediaItem.status == s)
                 ).scalar_one()
 
+            ignored_count = len(_ignored_paths(sess))
+
             return _render(
                 "items.html",
                 {
@@ -406,6 +420,7 @@ def create_app(
                     "items": items,
                     "current_status": status,
                     "tab_counts": tab_counts,
+                    "ignored_count": ignored_count,
                     "is_running": request.app.state.runner.is_running,
                     "ok": unquote(request.query_params.get("ok", "")),
                     "err": unquote(request.query_params.get("err", "")),
@@ -450,6 +465,52 @@ def create_app(
             return JSONResponse({"detail": "item not found"}, status_code=404)
         except ScrapeError as exc:
             return _redirect("/items", err=str(exc))
+
+    # ------------------------------------------------------------------
+    # POST /items/{id}/delete
+    # ------------------------------------------------------------------
+
+    @app.post("/items/{item_id}/delete")
+    async def items_delete(request: Request, item_id: int) -> Any:
+        """Delete a MediaItem record only — disk files are untouched.
+
+        The path is also recorded as ignored so a later scan does not re-add it.
+        """
+        runner: ScanRunner = request.app.state.runner
+        if runner.is_running:
+            return _redirect("/items", err="任务正在运行中，暂不能删除记录")
+
+        sess = request.app.state.session_factory()
+        try:
+            item = sess.get(MediaItem, item_id)
+            if item is None:
+                return JSONResponse({"detail": "item not found"}, status_code=404)
+            ignored = _ignored_paths(sess)
+            ignored.add(normalize_path(item.folder_path))
+            _set_ignored_paths(sess, ignored)
+            sess.delete(item)
+            sess.commit()
+            return _redirect("/items", ok="已删除该记录（磁盘文件未动）")
+        finally:
+            sess.close()
+
+    # ------------------------------------------------------------------
+    # POST /items/clear-ignored
+    # ------------------------------------------------------------------
+
+    @app.post("/items/clear-ignored")
+    async def items_clear_ignored(request: Request) -> Any:
+        """Clear the ignored-path list so deleted items re-appear on rescan."""
+        runner: ScanRunner = request.app.state.runner
+        if runner.is_running:
+            return _redirect("/items", err="任务正在运行中，暂不能修改忽略列表")
+        sess = request.app.state.session_factory()
+        try:
+            _set_ignored_paths(sess, set())
+            sess.commit()
+            return _redirect("/items", ok="已清空忽略列表")
+        finally:
+            sess.close()
 
     # ------------------------------------------------------------------
     # GET /logs

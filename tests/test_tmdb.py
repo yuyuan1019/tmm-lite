@@ -301,3 +301,44 @@ async def test_exception_text_does_not_contain_api_key(tmdb: TmdbScraper) -> Non
             await tmdb.search_and_fetch("星际穿越", 2014, "movie")
 
     assert "test-key" not in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Chinese sequence-number strip fallback
+# ---------------------------------------------------------------------------
+def test_strip_cjk_sequence_number() -> None:
+    from app.scrapers.tmdb import _strip_cjk_sequence_number
+
+    assert _strip_cjk_sequence_number("奇异博士1") == "奇异博士"
+    assert _strip_cjk_sequence_number("流浪地球2") == "流浪地球"
+    # No trailing digit → unchanged
+    assert _strip_cjk_sequence_number("奇异博士2：疯狂多元宇宙") == "奇异博士2：疯狂多元宇宙"
+    # Digit not immediately after CJK → unchanged
+    assert _strip_cjk_sequence_number("猎杀T34") == "猎杀T34"
+    # Non-Chinese titles → unchanged
+    assert _strip_cjk_sequence_number("2012") == "2012"
+    assert _strip_cjk_sequence_number("Blade Runner 2049") == "Blade Runner 2049"
+
+
+@pytest.mark.asyncio
+async def test_search_falls_back_to_stripped_cjk_title(tmdb: TmdbScraper) -> None:
+    """Exact Chinese title with a trailing "1" fails → retries without the number."""
+    search_json = _json("tmdb_search_movie.json")
+
+    with respx.mock as mock:
+        route = mock.get("https://api.themoviedb.org/3/search/movie")
+        route.side_effect = [
+            httpx.Response(200, json={"results": []}),  # 奇异博士1 + year
+            httpx.Response(200, json={"results": []}),  # 奇异博士1, no year
+            httpx.Response(200, json=search_json),      # 奇异博士 + year
+        ]
+        mock.get("https://api.themoviedb.org/3/movie/157336").respond(
+            json=_json("tmdb_movie_detail.json"),
+        )
+
+        result = await tmdb.search_and_fetch("奇异博士1", 2016, "movie")
+
+    assert result is not None
+    assert result.source_id == "157336"
+    queries = [c.request.url.params.get("query") for c in route.calls]
+    assert queries == ["奇异博士1", "奇异博士1", "奇异博士"]

@@ -105,3 +105,9 @@ class ScrapeScheduler:
             await self._runner.run_full()
         except ScanBusyError:
             logger.warning("定时任务触发时已有任务在运行，跳过本轮")
+        except asyncio.CancelledError:
+            # Manual stop via the web "停止" button cancels the running scan
+            # (which may be this scheduled job).  run_full has already marked
+            # remaining items failed; log and let the cancellation finish.
+            logger.info("定时任务被停止")
+            raise

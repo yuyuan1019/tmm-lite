@@ -1476,6 +1476,36 @@ async def test_download_subtitle_no_video_returns_none(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_scan_skips_ignored_paths(tmp_path: Path) -> None:
+    """Paths in the ignored (deleted) list are not re-added by a scan."""
+    from app.database import AppMeta
+    from app.scanner import _IGNORED_META_KEY, normalize_path
+
+    movies_dir = tmp_path / "movies"
+    d = movies_dir / "Film (2020)"
+    d.mkdir(parents=True)
+    (d / "movie.mkv").write_text("x")
+    keep = movies_dir / "Keep (2021)"
+    keep.mkdir()
+    (keep / "movie.mkv").write_text("x")
+
+    h = _setup(tmp_path)
+    runner = h.runner; tmdb = h.tmdb
+    tmdb.search_and_fetch.return_value = _mock_meta()
+    with h.session() as sess:
+        _add_library(sess, "Movies", str(movies_dir), "movie")
+        sess.add(AppMeta(key=_IGNORED_META_KEY, value=normalize_path(str(d))))
+        sess.commit()
+
+    log = await runner.run_full()
+    assert log.total == 1
+    with sess:
+        items = sess.query(MediaItem).all()
+        assert len(items) == 1
+        assert items[0].parsed_title == "Keep"
+
+
+@pytest.mark.asyncio
 async def test_discover_deep_movie_no_year(tmp_path: Path) -> None:
     """Deep layout without a year in the folder name falls back to the video folder."""
     movies_dir = tmp_path / "movies"
@@ -1494,3 +1524,107 @@ async def test_discover_deep_movie_no_year(tmp_path: Path) -> None:
     assert log.total == 3
     with sess:
         assert sess.query(MediaItem).count() == 3
+
+
+# ---------------------------------------------------------------------------
+# Manual stop (concurrency)
+# ---------------------------------------------------------------------------
+
+async def _hang_search(*args: object, **kwargs: object) -> None:
+    await asyncio.Event().wait()  # never completes → cancellable
+
+
+@pytest.mark.asyncio
+async def test_stop_background_scan(tmp_path: Path) -> None:
+    """stop() cancels the running scan and marks remaining items as stopped."""
+    movies_dir = tmp_path / "movies"
+    for i in range(3):
+        d = movies_dir / f"Movie {i} (2020)"
+        d.mkdir(parents=True)
+        (d / "movie.mkv").write_text("x")
+
+    h = _setup(tmp_path)
+    runner = h.runner; tmdb = h.tmdb
+    tmdb.search_and_fetch.side_effect = _hang_search
+    with h.session() as sess:
+        _add_library(sess, "Movies", str(movies_dir), "movie")
+
+    task = runner.start_full_background()
+    await asyncio.sleep(0.05)
+    assert runner.is_running
+
+    assert runner.stop() is True
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5.0)
+    assert runner.is_running is False
+
+    with h.session() as sess:
+        items = sess.query(MediaItem).all()
+        assert len(items) == 3
+        assert all(i.status == "failed" for i in items)
+        assert all("任务已手动停止" in (i.error_message or "") for i in items)
+
+
+@pytest.mark.asyncio
+async def test_stop_when_idle_returns_false(tmp_path: Path) -> None:
+    h = _setup(tmp_path)
+    assert h.runner.stop() is False
+
+
+@pytest.mark.asyncio
+async def test_scan_can_restart_after_stop(tmp_path: Path) -> None:
+    """After a stop, the mutex is released and a new scan runs normally."""
+    movies_dir = tmp_path / "movies"
+    d = movies_dir / "Movie (2020)"
+    d.mkdir(parents=True)
+    (d / "movie.mkv").write_text("x")
+
+    h = _setup(tmp_path)
+    runner = h.runner; tmdb = h.tmdb
+    tmdb.search_and_fetch.side_effect = _hang_search
+    with h.session() as sess:
+        _add_library(sess, "Movies", str(movies_dir), "movie")
+
+    task = runner.start_full_background()
+    await asyncio.sleep(0.05)
+    assert runner.is_running
+    assert runner.stop() is True
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5.0)
+    assert runner.is_running is False
+
+    # A fresh scan is allowed again
+    tmdb.search_and_fetch.side_effect = None
+    tmdb.search_and_fetch.return_value = _mock_meta()
+    log = await runner.run_full()
+    assert log.total == 1
+    with h.session() as sess:
+        assert sess.query(MediaItem).one().status == "matched"
+
+
+@pytest.mark.asyncio
+async def test_stop_awaited_run_full(tmp_path: Path) -> None:
+    """stop() also cancels a run_full() awaited by the scheduler."""
+    movies_dir = tmp_path / "movies"
+    d = movies_dir / "Movie (2020)"
+    d.mkdir(parents=True)
+    (d / "movie.mkv").write_text("x")
+
+    h = _setup(tmp_path)
+    runner = h.runner; tmdb = h.tmdb
+    tmdb.search_and_fetch.side_effect = _hang_search
+    with h.session() as sess:
+        _add_library(sess, "Movies", str(movies_dir), "movie")
+
+    task = asyncio.create_task(runner.run_full())  # mirrors the scheduler path
+    await asyncio.sleep(0.05)
+    assert runner.is_running
+    assert runner.stop() is True
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert runner.is_running is False
+    with h.session() as sess:
+        item = sess.query(MediaItem).one()
+        assert item.status == "failed"
+        assert "任务已手动停止" in (item.error_message or "")

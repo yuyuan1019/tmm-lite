@@ -317,6 +317,7 @@ class ScanRunner:
 
     async def run_full(self) -> ScrapeLog          # 全量：定时任务与"立即执行"共用
     def start_full_background(self) -> asyncio.Task[ScrapeLog]
+    def stop(self) -> bool                         # 请求停止：置标志 + task.cancel()，同步不阻塞
     async def rescrape_item(self, item_id: int) -> MediaItem   # 单条目，强制覆盖 NFO
     async def download_subtitle(self, item_id: int) -> Path | None  # 单条目手动字幕
     def reconfigure(self, config: AppConfig, tmdb: TmdbScraper,
@@ -423,11 +424,14 @@ class ScrapeScheduler:
 | GET `/` | 仪表盘 | 200 页面：库数、各状态计数、运行状态（is_running）、下次定时时间、最近一条 ScrapeLog | — |
 | POST `/run-scrape` | 后台启动全量任务（不阻塞请求） | 303 重定向回 `/` 带成功 flash | 任务运行中 → 303 + "任务运行中"提示（不报 500） |
 | GET `/libraries` | 库列表 + 各库条目数 | 200 | — |
+| POST `/stop-scrape` | 请求停止当前扫描 | 303 回 `/` | 运行中 → 成功提示；空闲 → 错误提示 |
 | POST `/libraries/add` | 新增库 | 303 回列表 | path 非绝对/重复/为空、类型非法或任务运行中 → 303 + 错误提示 |
 | POST `/libraries/{id}/delete` | 删库（级联删条目，不动磁盘） | 303 | id 不存在 → 404 |
 | GET `/items` | 条目表格，支持 `?status=` 过滤 | 200 | — |
 | POST `/items/{id}/rescrape` | 单条目重刮 | 303 回 `/items` | 运行中 → 提示；id 不存在 → 404 |
 | POST `/items/{id}/subtitle` | 单条目手动字幕 | 303 回 `/items` | 命中 → 成功提示；未命中/未启用/运行中 → 错误提示；id 不存在 → 404 |
+| POST `/items/{id}/delete` | 删除记录（不删文件，路径进忽略列表） | 303 回 `/items` | 运行中 → 提示；id 不存在 → 404 |
+| POST `/items/clear-ignored` | 清空忽略列表 | 303 回 `/items` | 运行中 → 提示 |
 | GET `/logs` | ScrapeLog 倒序列表 | 200 | — |
 | GET `/settings` | 设置表单（API Key 脱敏显示） | 200 | — |
 | POST `/settings` | 保存设置 + 热更新运行对象 | 303 + 成功提示 | 非法 cron/任务运行中 → 303 + 错误提示且不落盘 |

@@ -92,6 +92,12 @@ def test_run_scrape_trigger(client: TestClient) -> None:
     assert resp.status_code == 303
 
 
+def test_stop_scrape_idle(client: TestClient) -> None:
+    resp = client.post("/stop-scrape", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "没有正在运行" in unquote(resp.headers.get("location", ""))
+
+
 # ---------------------------------------------------------------------------
 # M9-T4: rescrape
 # ---------------------------------------------------------------------------
@@ -106,6 +112,80 @@ def test_rescrape_404(client: TestClient) -> None:
 def test_subtitle_404(client: TestClient) -> None:
     resp = client.post("/items/999/subtitle")
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# M9-T4c: delete item record (record only — files untouched)
+# ---------------------------------------------------------------------------
+def test_item_delete_record(tmp_path: Path) -> None:
+    from app.database import Library, MediaItem
+
+    data_dir = tmp_path / "data"
+    app = create_app(data_dir=data_dir, start_scheduler=False)
+    with TestClient(app) as c:
+        sf = c.app.state.session_factory
+        with sf.begin() as sess:
+            lib = Library(name="L", path="/media/m", media_type="movie")
+            sess.add(lib)
+            sess.flush()
+            item = MediaItem(
+                library_id=lib.id, media_type="movie",
+                folder_path="/media/m/Movie (2020)", parsed_title="Movie",
+                status="pending",
+            )
+            sess.add(item)
+            sess.flush()
+            item_id = item.id
+
+        resp = c.post(f"/items/{item_id}/delete", follow_redirects=False)
+        assert resp.status_code == 303
+        assert "已删除" in unquote(resp.headers.get("location", ""))
+
+        with sf() as sess:
+            assert sess.get(MediaItem, item_id) is None
+
+        # Missing id → 404
+        assert c.post("/items/999/delete").status_code == 404
+
+
+def test_item_delete_records_ignored_and_clear(tmp_path: Path) -> None:
+    from app.database import AppMeta, Library, MediaItem
+    from app.scanner import _IGNORED_META_KEY
+
+    data_dir = tmp_path / "data"
+    app = create_app(data_dir=data_dir, start_scheduler=False)
+    with TestClient(app) as c:
+        sf = c.app.state.session_factory
+        with sf.begin() as sess:
+            lib = Library(name="L", path="/media/m", media_type="movie")
+            sess.add(lib)
+            sess.flush()
+            item = MediaItem(
+                library_id=lib.id, media_type="movie",
+                folder_path="/media/m/Movie (2020)", parsed_title="Movie",
+                status="pending",
+            )
+            sess.add(item)
+            sess.flush()
+            item_id = item.id
+
+        c.post(f"/items/{item_id}/delete", follow_redirects=False)
+
+        # Path recorded as ignored
+        with sf() as sess:
+            meta = sess.get(AppMeta, _IGNORED_META_KEY)
+            assert meta is not None
+            assert "/media/m/Movie (2020)" in meta.value
+
+        # /items shows the ignored notice
+        page = c.get("/items")
+        assert "已忽略（删除记录、未删文件）1 条" in page.text
+
+        # Clear ignored → back to zero
+        c.post("/items/clear-ignored", follow_redirects=False)
+        with sf() as sess:
+            meta = sess.get(AppMeta, _IGNORED_META_KEY)
+            assert meta is None or meta.value == ""
 
 
 # ---------------------------------------------------------------------------

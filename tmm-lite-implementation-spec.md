@@ -325,10 +325,11 @@ NOISE_WORDS = {
 5. **确定标题区**：若年份来自括号 → 标题=括号前的子串；若来自裸年份 → 标题=第 4 步所选中 Match 的准确 `start()` 之前的子串。若该子串清洗后为空，则用全串继续，防止纯年份片名退化为空。
 6. 将第 3 步命中的季集片段从标题区删除。
 7. **严格按以下顺序清洗标题区**：
-   a. 先删除末尾发布组 `-XXX`，使 `x264-GROUP` 先恢复成可识别的 `x264`。
-   b. 处理方括号：`【】`/`[]` 内整体命中噪音词时连括号删除，否则只剥括号保留文本。
-   c. 将 NOISE_WORDS 按长度降序逐个做大小写不敏感的边界替换；边界为字符串首尾或非字母、数字、中文字符，因此 `h.264`、`国语中字` 可作为整体删除，又不会误删正常片名子串。
-   d. `.`、`_` 替换为空格，合并连续空白后 strip。中文与数字混排不额外切分（`流浪地球2` 保持原样）。
+   a. 删除开头中文媒体序号 `^\d{1,4}[.．、_]\s*(?=[一-鿿])`（`14.奇异博士1` → `奇异博士1`）。仅当分隔符后紧跟中文字符时剥离，故 `50.First.Dates`（拉丁）、`2012`（无分隔符）、`007：大破天幕杀机`（冒号）不受影响。
+   b. 先删除末尾发布组 `-XXX`，使 `x264-GROUP` 先恢复成可识别的 `x264`。
+   c. 处理方括号：`【】`/`[]` 内整体命中噪音词时连括号删除，否则只剥括号保留文本。
+   d. 将 NOISE_WORDS 按长度降序逐个做大小写不敏感的边界替换；边界为字符串首尾或非字母、数字、中文字符，因此 `h.264`、`国语中字` 可作为整体删除，又不会误删正常片名子串。
+   e. `.`、`_` 替换为空格，合并连续空白后 strip。中文与数字混排不额外切分（`流浪地球2` 保持原样）。
 8. 结果标题为空串 → `title=None`（调用方仅在没有可跳过 NFO 时置 manual_needed）。
 9. 函数不抛任何异常；内部异常捕获后返回全 None 并 `logger.debug`。
 
@@ -345,6 +346,9 @@ NOISE_WORDS = {
 | `【高清】星际穿越.2014.国语中字` | title=`星际穿越`（方括号剥离后清洗）, year=2014 |
 | `繁花.2023.S01E01.mkv` | title=`繁花`, year=2023, season=1, episode=1 |
 | `国语中字.某电影.2020.WEB-DL` | title=`某电影`, year=2020 |
+| `14.奇异博士1(2016).Doctor Strange 2016 UHD BluRay REMUX 2160p HEVC Atmos TrueHD 7.1-PTer` | title=`奇异博士1`, year=2016（开头序号剥离） |
+| `50.First.Dates (2004)` | title=`50 First Dates`（拉丁标题前数字保留） |
+| `007：大破天幕杀机 (2012)` | title=`007：大破天幕杀机`（冒号分隔不剥离） |
 | 空串 / `.....` / 纯噪音 | title=None |
 
 ---
@@ -447,8 +451,12 @@ class TmdbScraper:
 
 | 响应 | 行为 |
 |---|---|
-| 200，results 为空 | 带 year 时去掉 year 重搜一次；仍空 → 返回 None |
+| 200，results 为空 | 按候选查询×年份依次重搜，全部为空 → 返回 None |
 | 200，results 非空 | 取 `results[0]` 的 id 进详情 |
+
+搜索候选查询（由最精确到最宽松）：先原标题，再剥离末尾中文序号后的标题
+（`奇异博士1` → `奇异博士`，因 TMDB 标题不含「1」）；每个查询先带年份再不带年份。
+剥离规则：仅当数字紧跟 CJK 字符后，如 `^(.*[一-鿿])(\d+)$`，英文标题与 `猎杀T34` 不受影响。
 | API Key 为空 | 发请求前抛 `TmdbAuthError("TMDB API Key 未配置")` |
 | 401 | 抛 `TmdbAuthError("TMDB API Key 无效")`；scanner 先完成本地 NFO 跳过，再将尚未完成的 API 必需项置 failed |
 | 429 | 读 `Retry-After` 秒数（缺省 2）→ sleep；首次请求外最多重试 3 次（总尝试 4 次）仍为 429 则抛 `TmdbRateLimitError` |
@@ -579,6 +587,7 @@ class ScanRunner:
                  tmdb: TmdbScraper, douban: DoubanScraper | None): ...
     async def run_full(self) -> ScrapeLog: ...
     def start_full_background(self) -> asyncio.Task[ScrapeLog]: ...
+    def stop(self) -> bool: ...
     async def rescrape_item(self, item_id: int) -> MediaItem: ...
     async def _scrape_one(self, target: ScrapeTarget, *, force: bool) -> ScrapeResult: ...
     def reconfigure(self, config: AppConfig, tmdb: TmdbScraper,
@@ -836,6 +845,8 @@ except ScanBusyError: redirect("/?err=任务正在运行中，请稍后")
 redirect("/?ok=任务已启动")
 ```
 
+**POST `/stop-scrape`**（停止）：`runner.stop()` 为同步方法——仅置 `_stop_requested=True` 并 `task.cancel()`，不等待，故不会与扫描任务死锁。空闲 → `?err=当前没有正在运行的任务`；运行中 → `?ok=已请求停止，剩余条目将标记为已取消`。任务被取消时，`_run_full_impl` 的 `CancelledError` 分支把剩余条目置 failed，消息区分来源：`_stop_requested` 为真 → `任务已手动停止`，否则（应用关闭走 `shutdown()` 取消）→ `任务因应用关闭而取消`。互斥由任务 done-callback 释放（后台任务因 callback 不在任务上下文，`_done` 里显式清 `_current_task`），停止后 `is_running=False` 即可再起新扫描。
+
 **GET `/libraries`（libraries.html）**：表格列＝名称/路径/类型/条目数/删除按钮；底部新增表单。
 **POST `/libraries/add`** 表单字段：`name`(必填), `path`(必填), `media_type`(select: movie|tv)。
 校验失败文案：`名称不能为空` / `路径不能为空` / `路径必须是绝对路径` / `该路径已存在` /
@@ -855,6 +866,12 @@ redirect("/?ok=任务已启动")
 
 **POST `/items/{id}/subtitle`**（手动字幕刮削）：成功且命中 `?ok=字幕已下载: <文件名>`；未命中 `?err=未找到可用的字幕`；字幕未启用 `?err=字幕功能未启用…`；运行中 `?err=任务正在运行中`；404 同上格式。
 > 实现说明：与自动刮削的字幕步骤共用 `_download_subtitle_for_target`；单条目同步执行。
+
+**POST `/items/{id}/delete`**（删除当前记录）：仅删 `MediaItem` 行，磁盘文件不动；同时把 `normalize_path(folder_path)` 记入 `AppMeta["ignored_paths"]`（换行分隔），下次扫描跳过该路径不再重新加入。运行中 `?err=任务正在运行中…`；id 不存在 → 404。
+
+**POST `/items/clear-ignored`**（清空忽略列表）：置空 `ignored_paths`，已删除路径下次扫描重新出现。运行中 → 错误提示。
+
+`/items` 页顶部在忽略列表非空时显示「已忽略 N 条 … 清空忽略列表」；每行操作列新增「删除」按钮（`onsubmit` 二次确认）。
 
 **GET `/logs`（logs.html）**：ScrapeLog 倒序前 50 条；列＝开始/结束(本地时间)/耗时/total/matched/failed/detail（折叠展开）。
 
