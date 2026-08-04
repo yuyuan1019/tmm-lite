@@ -56,6 +56,17 @@
   </fieldset>
 
   <fieldset>
+    <legend>网络代理</legend>
+    <label>
+      代理地址：
+      <input type="text" name="proxy" value="{{ config.proxy }}" style="width:300px" placeholder="http://127.0.0.1:7890">
+    </label>
+    <p><small>
+      用于访问 TMDB 的代理（如 <code>http://127.0.0.1:7890</code> 或 <code>socks5://127.0.0.1:1080</code>）。留空表示直连。国内网络无法直连 TMDB 时，填上代理即可解决 <code>TMDB 网络错误</code>。
+    </small></p>
+  </fieldset>
+
+  <fieldset>
     <legend>媒体库浏览根</legend>
     <label>
       本地浏览起点：

@@ -30,13 +30,23 @@ class TmdbScraper:
     Args:
         api_key: TMDB v3 API key (may be empty — auth-protected calls will fail).
         language: ISO 639-1 language code sent with each search/detail request.
+        proxy: Optional ``http(s)``/``socks5`` proxy URL applied to both the
+            API and image clients.  Empty string / None means no proxy.
     """
 
-    def __init__(self, api_key: str, language: str = "zh-CN") -> None:
+    def __init__(
+        self, api_key: str, language: str = "zh-CN", proxy: str | None = None,
+    ) -> None:
         self._api_key = api_key
         self._language = language
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(15.0))
-        self._image_client = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
+        proxy = proxy or None
+        self._proxy = proxy
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(15.0), proxy=proxy,
+        )
+        self._image_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0), proxy=proxy,
+        )
 
     # ------------------------------------------------------------------
     # Public API

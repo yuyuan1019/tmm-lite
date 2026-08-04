@@ -101,7 +101,7 @@ def create_app(
         _run_seed_import(session_factory, config)
 
         # Scrapers
-        tmdb = TmdbScraper(config.effective_tmdb_api_key, config.language)
+        tmdb = TmdbScraper(config.effective_tmdb_api_key, config.language, config.proxy)
         douban = DoubanScraper(config.douban_delay_seconds) if config.use_douban else None
 
         # Encryption key (for connection credentials)
@@ -498,6 +498,7 @@ def create_app(
         os_api_key = str(form.get("opensubtitles_api_key", ""))
         subtitle_langs = str(form.get("subtitle_languages", "chi,zho,zh"))
         browse_root = str(form.get("browse_root", "/")).strip() or "/"
+        proxy = str(form.get("proxy", "")).strip()
 
         async with lock:
             runner: ScanRunner = request.app.state.runner
@@ -527,6 +528,7 @@ def create_app(
                 "subtitle_enabled": subtitle_enabled,
                 "subtitle_languages": subtitle_langs.strip(),
                 "browse_root": browse_root,
+                "proxy": proxy,
             }
             if clear_key:
                 updates["tmdb_api_key"] = ""
@@ -545,7 +547,7 @@ def create_app(
                 return _redirect("/settings", err=str(exc))
 
             # Prepare new scrapers
-            new_tmdb = TmdbScraper(new_config.effective_tmdb_api_key, new_config.language)
+            new_tmdb = TmdbScraper(new_config.effective_tmdb_api_key, new_config.language, new_config.proxy)
             new_douban = DoubanScraper(new_config.douban_delay_seconds) if new_config.use_douban else None
 
             # Apply to running objects (commit point)
@@ -576,6 +578,7 @@ def create_app(
                     "opensubtitles_api_key": old_config.opensubtitles_api_key,
                     "subtitle_languages": old_config.subtitle_languages,
                     "browse_root": old_config.browse_root,
+                    "proxy": old_config.proxy,
                 }
                 try:
                     save_config(rollback, request.app.state.config_path)

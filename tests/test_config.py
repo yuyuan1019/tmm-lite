@@ -34,6 +34,7 @@ def test_first_load_creates_file_with_defaults(tmp_data_dir: Path) -> None:
     assert config.schedule_cron == "0 4 * * *"
     assert config.libraries_seed == []
     assert config.effective_tmdb_api_key == ""
+    assert config.proxy == ""
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +97,42 @@ def test_save_config_partial_update(tmp_data_dir: Path) -> None:
     reloaded = load_config(config_path)
     assert reloaded.use_douban is False
     assert reloaded.douban_delay_seconds == 3.0
+
+
+# ---------------------------------------------------------------------------
+# M1-T3b: proxy round-trip + validation
+# ---------------------------------------------------------------------------
+def test_proxy_round_trip(tmp_data_dir: Path) -> None:
+    config_path = tmp_data_dir / "config.yaml"
+    config = save_config({"proxy": "http://127.0.0.1:7890"}, path=config_path)
+    assert config.proxy == "http://127.0.0.1:7890"
+
+    reloaded = load_config(config_path)
+    assert reloaded.proxy == "http://127.0.0.1:7890"
+
+
+def test_proxy_socks5_round_trip(tmp_data_dir: Path) -> None:
+    config_path = tmp_data_dir / "config.yaml"
+    config = save_config({"proxy": "socks5://127.0.0.1:1080"}, path=config_path)
+    assert config.proxy == "socks5://127.0.0.1:1080"
+
+
+def test_proxy_empty_ok(tmp_data_dir: Path) -> None:
+    config_path = tmp_data_dir / "config.yaml"
+    config = save_config({"proxy": ""}, path=config_path)
+    assert config.proxy == ""
+
+
+def test_proxy_invalid_scheme_rejected(tmp_data_dir: Path) -> None:
+    config_path = tmp_data_dir / "config.yaml"
+    with pytest.raises(ConfigError, match="proxy"):
+        save_config({"proxy": "ftp://127.0.0.1:21"}, path=config_path)
+
+
+def test_proxy_non_string_rejected(tmp_data_dir: Path) -> None:
+    config_path = tmp_data_dir / "config.yaml"
+    with pytest.raises(ConfigError, match="proxy"):
+        save_config({"proxy": 12345}, path=config_path)
 
 
 # ---------------------------------------------------------------------------

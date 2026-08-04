@@ -43,6 +43,30 @@ def tmdb_no_key() -> TmdbScraper:
 
 
 # ---------------------------------------------------------------------------
+# M5-T0: Proxy wiring — proxy is applied to both API and image clients
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_proxy_passed_to_clients() -> None:
+    scraper = TmdbScraper(api_key="test-key", proxy="http://127.0.0.1:7890")
+    assert scraper._proxy == "http://127.0.0.1:7890"
+    for client in (scraper._client, scraper._image_client):
+        # httpx 0.28 registers a proxy transport in ``_mounts`` when a proxy is set
+        assert client._mounts
+        proxied = next(iter(client._mounts.values()))
+        assert type(proxied._pool).__name__ == "AsyncHTTPProxy"
+    await scraper.aclose()
+
+
+@pytest.mark.asyncio
+async def test_no_proxy_by_default() -> None:
+    scraper = TmdbScraper(api_key="test-key")
+    assert scraper._proxy is None
+    for client in (scraper._client, scraper._image_client):
+        assert not client._mounts
+    await scraper.aclose()
+
+
+# ---------------------------------------------------------------------------
 # M5-T1: Movie search hit → detail → ScrapedMeta
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio

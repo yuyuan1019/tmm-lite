@@ -13,3 +13,19 @@ services:
       - /path/to/movies:/movies               # ← 改成你的电影目录（任意挂载路径都行）
       - /path/to/tvshows:/tvshows             # ← 改成你的剧集目录
     restart: unless-stopped
+
+    # ── 网络代理（国内无法直连 TMDB 时使用）─────────────────────────────
+    # 在 Web 设置页「网络代理」填入代理地址即可，无需改本文件。
+    # 注意：容器默认走桥接网络，访问不到宿主机上只监听 127.0.0.1 的代理
+    #（如 Clash 默认 7890 端口）。有以下两种让容器访问宿主机代理的方式：
+    #
+    # 方式 A（推荐，最简单）：改用 host 网络，容器直接共享宿主机网络栈，
+    #   设置页填 http://127.0.0.1:7890 即可。注意 host 网络下不能再用 ports
+    #   映射，需注释掉上方 ports 段并在此加入：
+    #     network_mode: host
+    #
+    # 方式 B：保持桥接网络，把代理改成监听 0.0.0.0，并在设置页填
+    #   http://host.docker.internal:7890（部分环境需加 extra_hosts）。
+    #   若用的是 Docker Desktop for Windows，可直接使用：
+    #     extra_hosts:
+    #       - "host.docker.internal:host-gateway"
