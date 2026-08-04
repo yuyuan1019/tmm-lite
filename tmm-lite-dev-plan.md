@@ -318,6 +318,7 @@ class ScanRunner:
     async def run_full(self) -> ScrapeLog          # 全量：定时任务与"立即执行"共用
     def start_full_background(self) -> asyncio.Task[ScrapeLog]
     async def rescrape_item(self, item_id: int) -> MediaItem   # 单条目，强制覆盖 NFO
+    async def download_subtitle(self, item_id: int) -> Path | None  # 单条目手动字幕
     def reconfigure(self, config: AppConfig, tmdb: TmdbScraper,
                     douban: DoubanScraper | None) -> tuple[...]
     async def shutdown(self) -> None
@@ -426,6 +427,7 @@ class ScrapeScheduler:
 | POST `/libraries/{id}/delete` | 删库（级联删条目，不动磁盘） | 303 | id 不存在 → 404 |
 | GET `/items` | 条目表格，支持 `?status=` 过滤 | 200 | — |
 | POST `/items/{id}/rescrape` | 单条目重刮 | 303 回 `/items` | 运行中 → 提示；id 不存在 → 404 |
+| POST `/items/{id}/subtitle` | 单条目手动字幕 | 303 回 `/items` | 命中 → 成功提示；未命中/未启用/运行中 → 错误提示；id 不存在 → 404 |
 | GET `/logs` | ScrapeLog 倒序列表 | 200 | — |
 | GET `/settings` | 设置表单（API Key 脱敏显示） | 200 | — |
 | POST `/settings` | 保存设置 + 热更新运行对象 | 303 + 成功提示 | 非法 cron/任务运行中 → 303 + 错误提示且不落盘 |

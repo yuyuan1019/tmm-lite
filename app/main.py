@@ -36,6 +36,7 @@ from app.exceptions import (
     ConfigError,
     ItemNotFoundError,
     ScanBusyError,
+    ScrapeError,
 )
 from app.scanner import ScanRunner, normalize_path
 from app.scheduler import ScrapeScheduler
@@ -430,6 +431,25 @@ def create_app(
             return _redirect("/items", err="任务正在运行中")
         except ItemNotFoundError:
             return JSONResponse({"detail": "item not found"}, status_code=404)
+
+    # ------------------------------------------------------------------
+    # POST /items/{id}/subtitle
+    # ------------------------------------------------------------------
+
+    @app.post("/items/{item_id}/subtitle")
+    async def items_subtitle(request: Request, item_id: int) -> Any:
+        runner: ScanRunner = request.app.state.runner
+        try:
+            result = await runner.download_subtitle(item_id)
+            if result is not None:
+                return _redirect("/items", ok=f"字幕已下载: {result.name}")
+            return _redirect("/items", err="未找到可用的字幕")
+        except ScanBusyError:
+            return _redirect("/items", err="任务正在运行中")
+        except ItemNotFoundError:
+            return JSONResponse({"detail": "item not found"}, status_code=404)
+        except ScrapeError as exc:
+            return _redirect("/items", err=str(exc))
 
     # ------------------------------------------------------------------
     # GET /logs

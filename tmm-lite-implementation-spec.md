@@ -606,8 +606,7 @@ try:
     found_paths_by_library = {}
     for lib in libraries:
         try:
-            children = sorted(Path(lib.path).iterdir())
-            found = scan children                               # movie 需 contains_video
+            found = discover_items_recursive(lib)                # 见下方「目录发现」说明
         except OSError as exc:
             detail.append(f"库扫描失败: {lib.path}: {exc}")
             continue                                            # 不标记该库 missing
@@ -669,7 +668,17 @@ return reload log_id with expire_on_commit=False
 `fully_scanned_library_ids` 为空时队列必须为空。扫描阶段数据库异常也必须进入 finally，此时预先
 初始化的 total/matched/failed 均为 0，保证 ScrapeLog 可以正常收尾。
 
-`contains_video(folder)`：递归深度 ≤2 找 VIDEO_EXTENSIONS 文件（电影可能有 `BDMV/` 子层）。
+目录发现采用**递归**而非只扫库根第一层（避免分组/深层结构漏检）：
+
+- **电影**：一个目录「直接含 ≥1 个视频文件」即为一个电影条目并停止下钻（防止 Extras/Trailer 子目录被单独计数）；无直接视频时递归子目录。特例：
+  - 库根目录直接放的散视频文件 → 每个散文件是一个**文件条目**（`folder_path` 指向视频文件本身）。
+  - 目录含 `BDMV/`/`VIDEO_TS/` 子目录（光盘结构）→ 该目录即电影条目。
+  - 无直接视频、且**恰有一个**子目录含视频、且自身名字解析出「标题+年份」→ 该目录为深层电影条目（如 `电影名 (2020)/Video/电影.mkv`）。
+- **电视剧**：非根目录「直接含视频 **或** 含 Season 子目录（`Season 01`/`S01`/`第1季`）」即一部剧，命中即停止递归（避免每季被多计一部）；否则递归。
+- 递归时跳过噪音目录集合（`extras`/`trailers`/`sample(s)`/`screenshots`/`featurettes`/`behind the scenes`/`deleted scenes`/`interviews`/`making of`/`outtakes`/`bonus`/`extra`/`.actors`/`.backdrops`/`logo` 等）。
+- `contains_video(folder)`：递归深度 ≤2 找 VIDEO_EXTENSIONS 文件（供深层判断与字幕定位使用，电影可能有 `BDMV/` 子层）。
+
+**文件条目（散文件）**：`MediaItem.folder_path` 存视频文件完整路径，天然唯一；标题由 `parse_folder_name(文件名)` 剥离扩展名得到。NFO/图片命名按 Kodi 约定——文件条目写 `<视频文件名stem>.nfo` 与 `<stem>-poster.jpg`/`<stem>-fanart.jpg`（与视频同目录）；文件夹条目保持 `movie.nfo`/`tvshow.nfo` 与 `poster.jpg`/`fanart.jpg`。`ScrapeTarget.is_file` 由 `folder_path` 后缀推导。
 
 `normalize_path(path)`：媒体库新增、seed 导入、扫描 upsert 全部共用。路径必须是绝对路径；执行
 `os.path.normpath` 去除尾斜杠和 `.` 段后存为 POSIX 字符串。为允许尚未挂载的路径，不调用
@@ -725,6 +734,17 @@ NFO 最后原子写入，因此失败不会产生或替换 NFO；强制重刮时
 - 网络 await 期间同样不得持有数据库事务。
 - busy/not-found 在创建 ScrapeLog 之前返回，不写任务日志；只有成功加载目标后才创建
   `ScrapeLog(total=1)`，因此 detail 中始终有可用的 folder_path。
+
+### 9.5 `download_subtitle(item_id)`
+
+- 通过同一个 `_claim()` 占位，与全量/重刮互斥。
+- 字幕功能未启用（`subtitle_enabled=false` 或未配置下载器）→ 抛 `ScrapeError`。
+- item 不存在 → 抛 `ItemNotFoundError`（Web 层转 404）；标题为空 → 抛 `ScrapeError`。
+- 与自动刮削共用 `_download_subtitle_for_target(target, conn, *, title, year)`：
+  - 文件夹条目：`media_folder=Path(folder_path)`，`video_filename` 为相对该文件夹的片段（避免路径前缀重复）。
+  - 文件条目（`is_file`）：`media_folder=Path(folder_path).parent`，`video_filename=文件名`（否则本地写入崩溃）。
+- 手动条目标题/年份优先 `matched_title`/`matched_year`，回退 `parsed_title`/`parsed_year`。
+- 返回下载到的字幕路径（无匹配返回 `None`），Web 层据此提示。
 
 ---
 
@@ -826,12 +846,15 @@ redirect("/?ok=任务已启动")
 
 **GET `/items`（items.html）**：
 - Query 参数 `status`（可选，五值之一，非法值忽略）。
-- 表格列：ID / 识别标题(parsed_title, manual_needed 时红字显示原文件夹名) / 年份 / 类型 / 匹配标题 / 评分 / 状态徽标 / 失败原因(error_message, title 属性放全文) / 操作(重新刮削按钮)。
+- 表格列：ID / 识别标题(parsed_title, manual_needed 时红字显示原文件名/文件夹名) / 年份 / 类型 / 匹配标题 / 评分 / 状态徽标 / 失败原因(error_message, title 属性放全文) / 操作(重新刮削 + 字幕按钮)。
 - 状态徽标颜色：pending 灰、matched 绿、failed 红、manual_needed 橙、missing 深灰。
 - 顶部过滤 tab：全部 + 五状态，显示各自计数。
 
 **POST `/items/{id}/rescrape`**：成功 `?ok=已完成重新刮削: <matched|failed>`；运行中 `?err=任务正在运行中`；404 同上格式。
 > 实现说明：rescrape 单条目同步执行（await），单条耗时秒级可接受；避免再造一套后台任务状态查询。
+
+**POST `/items/{id}/subtitle`**（手动字幕刮削）：成功且命中 `?ok=字幕已下载: <文件名>`；未命中 `?err=未找到可用的字幕`；字幕未启用 `?err=字幕功能未启用…`；运行中 `?err=任务正在运行中`；404 同上格式。
+> 实现说明：与自动刮削的字幕步骤共用 `_download_subtitle_for_target`；单条目同步执行。
 
 **GET `/logs`（logs.html）**：ScrapeLog 倒序前 50 条；列＝开始/结束(本地时间)/耗时/total/matched/failed/detail（折叠展开）。
 

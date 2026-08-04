@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -57,6 +58,7 @@ class ScrapeTarget:
     parsed_title: str | None
     parsed_year: int | None
     status: str
+    is_file: bool = False  # True for loose-file items (folder_path points at a video file)
 
 
 class ExistingNfoMatched:
@@ -65,6 +67,24 @@ class ExistingNfoMatched:
 
 ScrapeResult = ScrapedMeta | ExistingNfoMatched
 
+# ---------------------------------------------------------------------------
+# Discovery constants
+# ---------------------------------------------------------------------------
+
+# Sub-directories that are never media items themselves (skipped during recursion).
+_NOISE_DIR_NAMES: frozenset[str] = frozenset({
+    "extras", "trailer", "trailers", "sample", "samples", "screenshots",
+    "featurettes", "behind the scenes", "deleted scenes", "interviews",
+    "making of", "outtakes", "bonus", "extra", ".actors", ".backdrops",
+    "logo", "scrapbook",
+})
+
+# A directory is a TV show when it directly holds a Season-like sub-folder
+# (English "Season 01", compact "S01", or Chinese "第1季").
+_RE_SEASON_DIR = re.compile(r"(?i)^(?:season[ ._]?\d{1,2}|s\d{1,2}|第\d{1,2}季)$")
+
+# Disc-structure sub-folders that mark a movie folder (folder_path = parent).
+_DISC_STRUCTURE_DIRS: frozenset[str] = frozenset({"bdmv", "video_ts"})
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -112,6 +132,41 @@ def _nfo_filename(media_type: str) -> str:
     return "movie.nfo" if media_type == "movie" else "tvshow.nfo"
 
 
+def _is_file_item(rel: str) -> bool:
+    """True when *rel* points at a video file rather than a folder.
+
+    Loose-file items store the full video-file path in ``folder_path``, so
+    their relative path still ends in a video extension.
+    """
+    return Path(rel).suffix.lower() in VIDEO_EXTENSIONS
+
+
+def _nfo_rel(rel: str, media_type: str) -> str:
+    """Return the NFO path relative to the item's media location.
+
+    Folder items keep the Kodi folder convention (``movie.nfo`` / ``tvshow.nfo``
+    inside the folder); loose-file items use the per-file convention
+    (``<video-stem>.nfo`` next to the video file).
+    """
+    if _is_file_item(rel):
+        return str(PurePosixPath(rel).with_suffix(".nfo"))
+    return str(PurePosixPath(rel) / _nfo_filename(media_type))
+
+
+def _image_rel(rel: str, kind: str) -> str:
+    """Return the poster/fanart path relative to the item's media location.
+
+    ``kind`` is ``"poster"`` or ``"fanart"``.  Folder items keep ``poster.jpg``
+    / ``fanart.jpg``; loose-file items use ``<stem>-poster.jpg`` etc. next to
+    the video file (Kodi per-file convention).
+    """
+    if _is_file_item(rel):
+        suffix = "-poster.jpg" if kind == "poster" else "-fanart.jpg"
+        return str(PurePosixPath(rel).with_name(PurePosixPath(rel).stem + suffix))
+    name = "poster.jpg" if kind == "poster" else "fanart.jpg"
+    return str(PurePosixPath(rel) / name)
+
+
 def _library_connection(lib: Library, enc_key: bytes | None) -> Connection:
     """Create a :class:`Connection` for *lib*.
 
@@ -149,9 +204,9 @@ def _library_connection(lib: Library, enc_key: bytes | None) -> Connection:
 
 async def _nfo_exists_async(conn: Connection, rel_folder: str, media_type: str) -> bool:
     """Check whether the NFO file exists for *rel_folder* via *conn*."""
-    nfo_path = str(PurePosixPath(rel_folder) / _nfo_filename(media_type))
+    nfo_rel = _nfo_rel(rel_folder, media_type)
     try:
-        return await conn.exists(nfo_path)
+        return await conn.exists(nfo_rel)
     except OSError:
         return False
 
@@ -191,26 +246,95 @@ def _library_connection_from_target(target: ScrapeTarget, enc_key: bytes | None)
 
 
 async def _discover_folders(conn: Connection, lib: Library) -> set[str]:
-    """Return the set of absolute POSIX folder paths discovered under *lib*.
+    """Return the set of absolute POSIX item paths discovered under *lib*.
 
-    Raises ``OSError`` when the library root cannot be read.
+    Item paths are folders for folder-based items and full video-file paths
+    for loose files directly in the library root.  Discovery recurses, so
+    genre/director-grouped and deeply nested layouts are covered.  Raises
+    ``OSError`` when the library root cannot be read.
     """
     found: set[str] = set()
-    entries = await conn.list_dir("")
+    await _discover_walk(conn, lib, "", found, is_root=True)
+    return found
 
+
+async def _discover_walk(
+    conn: Connection, lib: Library, rel: str, found: set[str], *, is_root: bool,
+) -> None:
+    """Recursively collect movie/TV item paths under directory *rel*.
+
+    *rel* is ``""`` for the library root.  ``found`` receives normalized
+    absolute paths (folders, or video-file paths for root loose files).
+    """
+    entries = await conn.list_dir(rel)
+    videos: list[str] = []
+    subdirs: list[str] = []
+    has_disc_subdir = False
     for name in entries:
-        rel = name
-        abs_path = str(PurePosixPath(lib.path) / rel)
+        child_rel = name if not rel else str(PurePosixPath(rel) / name)
         try:
-            if lib.media_type == "movie":
-                if await conn.contains_video(rel):
-                    found.add(normalize_path(abs_path))
-            else:  # tv
-                if await conn.is_dir(rel):
-                    found.add(normalize_path(abs_path))
+            if await conn.is_file(child_rel):
+                if Path(name).suffix.lower() in VIDEO_EXTENSIONS:
+                    videos.append(name)
+            elif await conn.is_dir(child_rel):
+                lower = name.lower()
+                if lower in _DISC_STRUCTURE_DIRS:
+                    has_disc_subdir = True
+                elif lower not in _NOISE_DIR_NAMES:
+                    subdirs.append(name)
         except OSError:
             continue
-    return found
+
+    if lib.media_type == "movie":
+        if is_root:
+            # Loose videos in the library root are individual file items.
+            for v in videos:
+                found.add(normalize_path(str(PurePosixPath(lib.path) / v)))
+        elif videos or has_disc_subdir:
+            # A folder that directly holds a video — or a disc structure
+            # (Movie/BDMV, Movie/VIDEO_TS) — is one movie.  Stop descending so
+            # Extras/Featurette sub-folders are not counted as movies.
+            found.add(normalize_path(str(PurePosixPath(lib.path) / rel)))
+            return
+        elif await _looks_like_deep_movie(conn, rel, subdirs):
+            # e.g. "Movie (2020)/Video/movie.mkv": this folder has no direct
+            # video but exactly one sub-folder that does, and its own name
+            # parses to a titled+year movie → this folder is the movie.
+            found.add(normalize_path(str(PurePosixPath(lib.path) / rel)))
+            return
+        for d in subdirs:
+            await _discover_walk(conn, lib, _join_rel(rel, d), found, is_root=False)
+    else:  # tv
+        if not is_root and (videos or any(_RE_SEASON_DIR.match(s) for s in subdirs)):
+            # A folder holding episodes directly or Season sub-folders is a show.
+            # Stop descending so each Season folder is not counted as a show.
+            found.add(normalize_path(str(PurePosixPath(lib.path) / rel)))
+            return
+        for d in subdirs:
+            await _discover_walk(conn, lib, _join_rel(rel, d), found, is_root=False)
+
+
+def _join_rel(rel: str, name: str) -> str:
+    """Join a directory-relative path onto *rel* (``""`` for the root)."""
+    return name if not rel else str(PurePosixPath(rel) / name)
+
+
+async def _looks_like_deep_movie(conn: Connection, rel: str, subdirs: list[str]) -> bool:
+    """True when *rel* is a deeply-nested movie folder.
+
+    Matches layouts like ``Movie (2020)/Video/movie.mkv`` where the movie
+    folder itself holds no video but exactly one of its sub-folders does, and
+    its own name parses to a titled + year movie.
+    """
+    if len(subdirs) != 1:
+        return False
+    parsed = parse_folder_name(Path(rel).name)
+    if not parsed.title or parsed.year is None:
+        return False
+    try:
+        return await conn.contains_video(_join_rel(rel, subdirs[0]))
+    except OSError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +451,19 @@ class ScanRunner:
         self._claim()
         try:
             return await self._rescrape_item_impl(item_id)
+        finally:
+            self._release()
+
+    async def download_subtitle(self, item_id: int) -> Path | None:
+        """Manually download subtitles for a single item.
+
+        Returns the saved subtitle path, or ``None`` when no subtitle matched.
+        Raises :class:`ItemNotFoundError` when the item is missing and
+        :class:`ScanBusyError` when a scan is already running.
+        """
+        self._claim()
+        try:
+            return await self._download_subtitle_impl(item_id)
         finally:
             self._release()
 
@@ -585,6 +722,40 @@ class ScanRunner:
             return item
 
     # ------------------------------------------------------------------
+    # Single item subtitle download
+    # ------------------------------------------------------------------
+
+    async def _download_subtitle_impl(self, item_id: int) -> Path | None:
+        """Manual subtitle download for a single item (mutex already held)."""
+        if not self._config.subtitle_enabled or self._subtitle is None:
+            raise ScrapeError("字幕功能未启用，请在设置中开启")
+
+        target = self._load_target(item_id)
+        if target is None:
+            raise ItemNotFoundError(f"MediaItem {item_id} 不存在")
+
+        # Prefer the matched title/year for a better search; fall back to parsed.
+        title: str = target.parsed_title or ""
+        year: int | None = target.parsed_year
+        with self._session_factory() as sess:
+            item = sess.get(MediaItem, item_id)
+            if item is not None:
+                if item.matched_title:
+                    title = item.matched_title
+                year = item.matched_year or item.parsed_year
+
+        if not title:
+            raise ScrapeError("标题解析为空，无法搜索字幕")
+
+        conn = _library_connection_from_target(target, self._enc_key)
+        try:
+            return await self._download_subtitle_for_target(
+                target, conn, title=title, year=year,
+            )
+        finally:
+            await conn.aclose()
+
+    # ------------------------------------------------------------------
     # Core scrape logic
     # ------------------------------------------------------------------
 
@@ -638,17 +809,13 @@ class ScanRunner:
         # Step 5: Download images
         if meta.poster_url:
             poster_bytes = await self._tmdb.fetch_image(meta.poster_url)
-            await conn.write_bytes(
-                str(PurePosixPath(rel_folder) / "poster.jpg"), poster_bytes,
-            )
+            await conn.write_bytes(_image_rel(rel_folder, "poster"), poster_bytes)
         if meta.backdrop_url:
             backdrop_bytes = await self._tmdb.fetch_image(meta.backdrop_url)
-            await conn.write_bytes(
-                str(PurePosixPath(rel_folder) / "fanart.jpg"), backdrop_bytes,
-            )
+            await conn.write_bytes(_image_rel(rel_folder, "fanart"), backdrop_bytes)
 
         # Step 6: Write NFO (last — completion marker before subtitles)
-        nfo_rel = str(PurePosixPath(rel_folder) / _nfo_filename(target.media_type))
+        nfo_rel = _nfo_rel(rel_folder, target.media_type)
         nfo_bytes = (
             build_movie_nfo_bytes(meta)
             if target.media_type == "movie"
@@ -659,13 +826,8 @@ class ScanRunner:
         # Step 7: Subtitle download (best-effort, after NFO)
         if self._config.subtitle_enabled and self._subtitle is not None:
             try:
-                video_rel = await _find_video_file_async(conn, rel_folder)
-                await self._subtitle.download(
-                    title=target.parsed_title or meta.title,
-                    year=meta.year,
-                    media_folder=Path(target.folder_path),
-                    video_filename=video_rel,
-                    connection=conn,
+                await self._download_subtitle_for_target(
+                    target, conn, title=target.parsed_title or meta.title, year=meta.year,
                 )
             except Exception:
                 logger.warning(
@@ -673,6 +835,46 @@ class ScanRunner:
                 )
 
         return meta
+
+    # ------------------------------------------------------------------
+    # Subtitle download (shared by auto-scrape and manual trigger)
+    # ------------------------------------------------------------------
+
+    async def _download_subtitle_for_target(
+        self,
+        target: ScrapeTarget,
+        conn: Connection,
+        *,
+        title: str,
+        year: int | None,
+    ) -> Path | None:
+        """Download subtitles for *target*; returns the saved path or ``None``.
+
+        Shared by the auto-scrape subtitle step and the manual per-item
+        ``download_subtitle`` entry point.  ``video_filename`` must be relative
+        to ``media_folder`` so local and remote (connection-backed) writes land
+        next to the video file.
+        """
+        if not self._subtitle:
+            return None
+        rel_folder = _relative_folder(target.folder_path, target.library_path)
+        if target.is_file:
+            media_folder = Path(target.folder_path).parent
+            video_filename = Path(rel_folder).name
+        else:
+            media_folder = Path(target.folder_path)
+            video_rel = await _find_video_file_async(conn, rel_folder)
+            if not video_rel:
+                return None
+            prefix = rel_folder.rstrip("/") + "/"
+            video_filename = video_rel.removeprefix(prefix) if video_rel.startswith(prefix) else video_rel
+        return await self._subtitle.download(
+            title=title,
+            year=year,
+            media_folder=media_folder,
+            video_filename=video_filename,
+            connection=conn,
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -698,6 +900,7 @@ class ScanRunner:
                 parsed_title=item.parsed_title,
                 parsed_year=item.parsed_year,
                 status=item.status,
+                is_file=Path(item.folder_path).suffix.lower() in VIDEO_EXTENSIONS,
             )
 
 

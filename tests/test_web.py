@@ -101,6 +101,14 @@ def test_rescrape_404(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# M9-T4b: manual subtitle
+# ---------------------------------------------------------------------------
+def test_subtitle_404(client: TestClient) -> None:
+    resp = client.post("/items/999/subtitle")
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # M9-T5: Items filtering
 # ---------------------------------------------------------------------------
 def test_items_filter(client: TestClient) -> None:

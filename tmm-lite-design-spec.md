@@ -124,11 +124,15 @@ tmm-lite/
     └── static/
 ```
 
-**媒体库目录约定**（扫描器依赖这个约定去识别条目）：
+**媒体库目录约定**（扫描器依赖这个约定去识别条目；发现是**递归**的，分组/深层结构同样支持）：
 
 - 电影：一部电影一个文件夹，文件夹内放视频文件。文件夹名建议格式 `片名 (年份)`，例如：
   `/media/movies/星际穿越 (2014)/Interstellar.2014.1080p.mkv`
-- 电视剧：一部剧一个文件夹，文件夹名 `剧名 (年份)`；其下可选按季分子文件夹 `Season 01` 或 `S01`；
+- 电影亦支持：
+  - 分类/导演/系列分组嵌套，如 `/media/movies/动作/星际穿越 (2014)/Interstellar.2014.1080p.mkv`；
+  - 视频位于更深子目录（如 `片名 (2020)/Video/电影.mkv`、`片名/BDMV/STREAM/*.m2ts`）；
+  - 库根目录直接放置的散视频文件——每个散文件视为一个条目。
+- 电视剧：一部剧一个文件夹，文件夹名 `剧名 (年份)`；其下可选按季分子文件夹 `Season 01`/`S01`/`第1季`；
   集文件名需包含 `S01E02` 或中文 `第01集` 格式，例如：
   `/media/tvshows/繁花 (2023)/Season 01/繁花.S01E01.mkv`
 
@@ -150,7 +154,7 @@ tmm-lite/
 | id | 主键 |
 | library_id | 所属媒体库 |
 | media_type | movie / tv |
-| folder_path | 磁盘路径，唯一 |
+| folder_path | 磁盘路径，唯一；文件夹条目为目录路径，库根散文件条目为视频文件完整路径 |
 | parsed_title / parsed_year | 从文件名解析出的原始标题/年份（刮削前） |
 | status | pending（待处理）/ matched（已匹配）/ failed（失败）/ manual_needed（解析失败需人工处理，见第 8 节）/ missing（磁盘文件夹已删除，见 7.1 第 3 步） |
 | source | v1 固定为 tmdb；豆瓣仅补充简介/评分，不改变主来源 |
@@ -292,6 +296,7 @@ Web 页面对某一行点击"重新刮削"，只对该条目重复步骤 7.1 第
 | POST | `/libraries/{id}/delete` | 删除媒体库（不删磁盘文件） |
 | GET | `/items` | 刮削结果列表页 |
 | POST | `/items/{id}/rescrape` | 单条目重新刮削 |
+| POST | `/items/{id}/subtitle` | 单条目手动下载字幕 |
 | GET | `/logs` | 任务日志页 |
 | GET | `/settings` | 设置页 |
 | POST | `/settings` | 保存设置（TMDB key/清除 key / 豆瓣开关 / 间隔 / cron / 覆盖已有 NFO 开关） |

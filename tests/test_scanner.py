@@ -1103,3 +1103,394 @@ async def test_nfo_exists_async_via_connection() -> None:
     conn = _FakeConnection("/root", files)
     assert await _nfo_exists_async(conn, "Film", "movie") is True
     assert await _nfo_exists_async(conn, "Film", "tv") is False  # tvshow.nfo absent
+
+
+# ---------------------------------------------------------------------------
+# Recursive discovery — grouped / deep / loose-file / TV / BDMV
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_discover_grouped_movies(tmp_path: Path) -> None:
+    """Genre/Director-grouped layout discovers each movie folder, not the group."""
+    movies_dir = tmp_path / "movies"
+    for g in range(3):
+        genre = movies_dir / f"Genre {g}"
+        for m in range(4):
+            d = genre / f"Movie {g}-{m} (2020)"
+            d.mkdir(parents=True)
+            (d / "video.mkv").write_text("x")
+
+    h = _setup(tmp_path)
+    runner = h.runner; tmdb = h.tmdb
+    tmdb.search_and_fetch.return_value = _mock_meta()
+    with h.session() as sess:
+        _add_library(sess, "Movies", str(movies_dir), "movie")
+
+    log = await runner.run_full()
+    assert log.total == 12  # 3 genres x 4 movies
+    with sess:
+        assert sess.query(MediaItem).count() == 12
+
+
+@pytest.mark.asyncio
+async def test_discover_deep_movies(tmp_path: Path) -> None:
+    """Videos nested deeper than two levels are still discovered."""
+    movies_dir = tmp_path / "movies"
+    for i in range(6):
+        d = movies_dir / f"Movie {i} (2020)" / "Video" / "x264"
+        d.mkdir(parents=True)
+        (d / "movie.mkv").write_text("x")
+
+    h = _setup(tmp_path)
+    runner = h.runner; tmdb = h.tmdb
+    tmdb.search_and_fetch.return_value = _mock_meta()
+    with h.session() as sess:
+        _add_library(sess, "Movies", str(movies_dir), "movie")
+
+    log = await runner.run_full()
+    assert log.total == 6
+    with sess:
+        assert sess.query(MediaItem).count() == 6
+
+
+@pytest.mark.asyncio
+async def test_discover_root_loose_files(tmp_path: Path) -> None:
+    """Loose video files directly in the library root become file items."""
+    movies_dir = tmp_path / "movies"
+    movies_dir.mkdir()
+    for i in range(5):
+        (movies_dir / f"Loose {i} (2020).mkv").write_text("x")
+
+    h = _setup(tmp_path)
+    runner = h.runner; tmdb = h.tmdb
+    tmdb.search_and_fetch.side_effect = [
+        _mock_meta(title=f"Loose {i}", year=2020) for i in range(5)
+    ]
+    with h.session() as sess:
+        _add_library(sess, "Movies", str(movies_dir), "movie")
+
+    log = await runner.run_full()
+    assert log.total == 5
+    assert log.matched == 5
+    with sess:
+        items = sess.query(MediaItem).all()
+        assert len(items) == 5
+        # folder_path points at the video file itself
+        assert all(i.folder_path.endswith(".mkv") for i in items)
+
+
+@pytest.mark.asyncio
+async def test_discover_mixed_root(tmp_path: Path) -> None:
+    """Root with both loose files and movie folders counts both."""
+    movies_dir = tmp_path / "movies"
+    movies_dir.mkdir()
+    for i in range(3):
+        (movies_dir / f"Loose {i} (2020).mkv").write_text("x")
+        d = movies_dir / f"Folder {i} (2020)"
+        d.mkdir()
+        (d / "movie.mkv").write_text("x")
+
+    h = _setup(tmp_path)
+    runner = h.runner; tmdb = h.tmdb
+    tmdb.search_and_fetch.return_value = _mock_meta()
+    with h.session() as sess:
+        _add_library(sess, "Movies", str(movies_dir), "movie")
+
+    log = await runner.run_full()
+    assert log.total == 6
+    with sess:
+        assert sess.query(MediaItem).count() == 6
+
+
+@pytest.mark.asyncio
+async def test_discover_skips_noise_dirs(tmp_path: Path) -> None:
+    """Trailers/Extras/samples must not be counted as movies."""
+    movies_dir = tmp_path / "movies"
+    movies_dir.mkdir()
+    d = movies_dir / "Film (2020)"
+    d.mkdir()
+    (d / "movie.mkv").write_text("x")
+    (movies_dir / "Trailers").mkdir()
+    (movies_dir / "Trailers" / "trailer.mkv").write_text("x")
+    (movies_dir / "Extras").mkdir()
+    (movies_dir / "Extras" / "featurette.mkv").write_text("x")
+    (movies_dir / "samples").mkdir()
+    (movies_dir / "samples" / "sample.mkv").write_text("x")
+
+    h = _setup(tmp_path)
+    runner = h.runner; tmdb = h.tmdb
+    tmdb.search_and_fetch.return_value = _mock_meta()
+    with h.session() as sess:
+        _add_library(sess, "Movies", str(movies_dir), "movie")
+
+    log = await runner.run_full()
+    assert log.total == 1  # only "Film (2020)"
+    with sess:
+        items = sess.query(MediaItem).all()
+        assert len(items) == 1
+        assert items[0].parsed_title == "Film"
+
+
+@pytest.mark.asyncio
+async def test_discover_tv_grouped(tmp_path: Path) -> None:
+    """Grouped TV (Franchise/Show/Season) yields one item per show, not per season."""
+    tv_dir = tmp_path / "tv"
+    for s in range(4):
+        show = tv_dir / f"Show {s} (2021)" / "Season 01"
+        show.mkdir(parents=True)
+        (show / "ep01.mkv").write_text("x")
+    for f in range(2):
+        show = tv_dir / f"Franchise {f}" / f"TvShow {f} (2021)" / "Season 02"
+        show.mkdir(parents=True)
+        (show / "ep01.mkv").write_text("x")
+
+    h = _setup(tmp_path)
+    runner = h.runner; tmdb = h.tmdb
+    tmdb.search_and_fetch.return_value = _mock_meta()
+    with h.session() as sess:
+        _add_library(sess, "TV", str(tv_dir), "tv")
+
+    log = await runner.run_full()
+    assert log.total == 6  # 4 flat shows + 2 grouped shows, NOT +seasons
+    with sess:
+        assert sess.query(MediaItem).count() == 6
+
+
+@pytest.mark.asyncio
+async def test_discover_bdmv(tmp_path: Path) -> None:
+    """A BDMV/VIDEO_TS sub-folder marks its parent as one movie."""
+    movies_dir = tmp_path / "movies"
+    for i in range(3):
+        d = movies_dir / f"Disc {i} (2019)" / "BDMV" / "STREAM"
+        d.mkdir(parents=True)
+        (d / "x.m2ts").write_text("x")
+
+    h = _setup(tmp_path)
+    runner = h.runner; tmdb = h.tmdb
+    tmdb.search_and_fetch.return_value = _mock_meta(title="Disc")
+    with h.session() as sess:
+        _add_library(sess, "Movies", str(movies_dir), "movie")
+
+    log = await runner.run_full()
+    assert log.total == 3
+    with sess:
+        items = sess.query(MediaItem).all()
+        assert len(items) == 3
+        # Item folder is the disc folder, not the STREAM dir
+        assert all(not i.folder_path.endswith("STREAM") for i in items)
+
+
+# ---------------------------------------------------------------------------
+# File-item NFO naming (loose-file items use <video-stem>.nfo)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_file_item_writes_stem_nfo(tmp_path: Path) -> None:
+    """A loose-file movie gets <stem>.nfo beside the video, not movie.nfo."""
+    movies_dir = tmp_path / "movies"
+    movies_dir.mkdir()
+    (movies_dir / "Interstellar (2014).mkv").write_text("x")
+
+    h = _setup(tmp_path)
+    runner = h.runner; tmdb = h.tmdb
+    tmdb.search_and_fetch.return_value = _mock_meta(title="Interstellar", year=2014)
+    with h.session() as sess:
+        _add_library(sess, "Movies", str(movies_dir), "movie")
+
+    await runner.run_full()
+
+    assert (movies_dir / "Interstellar (2014).nfo").exists()
+    assert not (movies_dir / "movie.nfo").exists()
+
+
+# ---------------------------------------------------------------------------
+# Manual subtitle download (folder + loose-file items)
+# ---------------------------------------------------------------------------
+
+def _make_subtitle_runner(tmp_path: Path, files: list[tuple[Path, str]]) -> _RunnerHarness:
+    """Build a runner with subtitle enabled and a stubbed downloader."""
+    h = _setup(tmp_path, _make_config(subtitle_enabled=True))
+    sub = AsyncMock()
+    sub.download.return_value = Path("/fake/subtitle.srt")
+    sub.aclose = AsyncMock()
+    h.runner.set_subtitle_downloader(sub)  # type: ignore[arg-type]
+    with h.session() as sess:
+        for path, media_type in files:
+            _add_library(sess, path.name, str(path), media_type)
+    return h
+
+
+def _add_item(sess: Session, lib: Library, folder_path: str, title: str, year: int) -> int:
+    item = MediaItem(
+        library_id=lib.id,
+        media_type="movie",
+        folder_path=folder_path,
+        parsed_title=title,
+        parsed_year=year,
+        status="pending",
+    )
+    sess.add(item)
+    sess.commit()
+    return item.id
+
+
+@pytest.mark.asyncio
+async def test_download_subtitle_folder_item(tmp_path: Path) -> None:
+    """Manual subtitle for a folder item passes folder + relative video filename."""
+    movies_dir = tmp_path / "movies"
+    d = movies_dir / "Film (2020)"
+    d.mkdir(parents=True)
+    (d / "movie.mkv").write_text("x")
+
+    h = _make_subtitle_runner(tmp_path, [(movies_dir, "movie")])
+    sub = h.runner._subtitle  # type: ignore[attr-defined]
+
+    with h.session() as sess:
+        lib = sess.query(Library).one()
+        item_id = _add_item(sess, lib, str(movies_dir / "Film (2020)"), "Film", 2020)
+
+    result = await h.runner.download_subtitle(item_id)
+
+    assert result == Path("/fake/subtitle.srt")
+    sub.download.assert_awaited_once()
+    kwargs = sub.download.await_args.kwargs
+    assert kwargs["media_folder"] == Path(str(movies_dir / "Film (2020)"))
+    assert kwargs["video_filename"] == "movie.mkv"
+    assert kwargs["title"] == "Film"
+    assert kwargs["year"] == 2020
+
+
+@pytest.mark.asyncio
+async def test_download_subtitle_file_item(tmp_path: Path) -> None:
+    """Manual subtitle for a loose-file item uses the file's parent + name."""
+    movies_dir = tmp_path / "movies"
+    movies_dir.mkdir()
+    (movies_dir / "Loose (2020).mkv").write_text("x")
+
+    h = _make_subtitle_runner(tmp_path, [(movies_dir, "movie")])
+    sub = h.runner._subtitle  # type: ignore[attr-defined]
+
+    with h.session() as sess:
+        lib = sess.query(Library).one()
+        item_id = _add_item(sess, lib, str(movies_dir / "Loose (2020).mkv"), "Loose", 2020)
+
+    result = await h.runner.download_subtitle(item_id)
+
+    assert result == Path("/fake/subtitle.srt")
+    sub.download.assert_awaited_once()
+    kwargs = sub.download.await_args.kwargs
+    assert kwargs["media_folder"] == Path(str(movies_dir))
+    assert kwargs["video_filename"] == "Loose (2020).mkv"
+    assert kwargs["title"] == "Loose"
+
+
+@pytest.mark.asyncio
+async def test_download_subtitle_disabled_raises(tmp_path: Path) -> None:
+    """Subtitle feature disabled → ScrapeError."""
+    from app.exceptions import ScrapeError
+
+    movies_dir = tmp_path / "movies"
+    movies_dir.mkdir()
+    (movies_dir / "M.mkv").write_text("x")
+
+    h = _setup(tmp_path, _make_config(subtitle_enabled=False))
+    h.runner.set_subtitle_downloader(None)
+    with h.session() as sess:
+        lib = _add_library(sess, "Movies", str(movies_dir), "movie")
+        item_id = _add_item(sess, lib, str(movies_dir / "M.mkv"), "M", 2020)
+
+    with pytest.raises(ScrapeError):
+        await h.runner.download_subtitle(item_id)
+
+
+@pytest.mark.asyncio
+async def test_download_subtitle_item_not_found(tmp_path: Path) -> None:
+    """Missing item → ItemNotFoundError."""
+    from app.exceptions import ItemNotFoundError
+
+    h = _make_subtitle_runner(tmp_path, [])
+    with pytest.raises(ItemNotFoundError):
+        await h.runner.download_subtitle(999)
+
+
+@pytest.mark.asyncio
+async def test_download_subtitle_empty_title_raises(tmp_path: Path) -> None:
+    """Unparseable title → ScrapeError."""
+    from app.exceptions import ScrapeError
+
+    movies_dir = tmp_path / "movies"
+    movies_dir.mkdir()
+    (movies_dir / "M.mkv").write_text("x")
+
+    h = _make_subtitle_runner(tmp_path, [(movies_dir, "movie")])
+    with h.session() as sess:
+        lib = sess.query(Library).one()
+        item_id = _add_item(sess, lib, str(movies_dir / "M.mkv"), "", 2020)
+
+    with pytest.raises(ScrapeError):
+        await h.runner.download_subtitle(item_id)
+
+
+@pytest.mark.asyncio
+async def test_download_subtitle_prefers_matched_title(tmp_path: Path) -> None:
+    """Manual subtitle prefers matched_title/matched_year over parsed values."""
+    movies_dir = tmp_path / "movies"
+    movies_dir.mkdir()
+    (movies_dir / "M.mkv").write_text("x")
+
+    h = _make_subtitle_runner(tmp_path, [(movies_dir, "movie")])
+    sub = h.runner._subtitle  # type: ignore[attr-defined]
+    with h.session() as sess:
+        lib = sess.query(Library).one()
+        item_id = _add_item(sess, lib, str(movies_dir / "M.mkv"), "Parsed", 2020)
+        item = sess.get(MediaItem, item_id)
+        assert item is not None
+        item.matched_title = "Matched"
+        item.matched_year = 2021
+        sess.commit()
+
+    await h.runner.download_subtitle(item_id)
+
+    kwargs = sub.download.await_args.kwargs
+    assert kwargs["title"] == "Matched"
+    assert kwargs["year"] == 2021
+
+
+@pytest.mark.asyncio
+async def test_download_subtitle_no_video_returns_none(tmp_path: Path) -> None:
+    """Folder item with no video file inside → None (no subtitle attempt)."""
+    movies_dir = tmp_path / "movies"
+    d = movies_dir / "Film (2020)"
+    d.mkdir(parents=True)  # empty folder, no video
+
+    h = _make_subtitle_runner(tmp_path, [(movies_dir, "movie")])
+    sub = h.runner._subtitle  # type: ignore[attr-defined]
+    with h.session() as sess:
+        lib = sess.query(Library).one()
+        item_id = _add_item(sess, lib, str(movies_dir / "Film (2020)"), "Film", 2020)
+
+    result = await h.runner.download_subtitle(item_id)
+
+    assert result is None
+    sub.download.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_discover_deep_movie_no_year(tmp_path: Path) -> None:
+    """Deep layout without a year in the folder name falls back to the video folder."""
+    movies_dir = tmp_path / "movies"
+    for i in range(3):
+        d = movies_dir / f"Movie {i}" / "Video"
+        d.mkdir(parents=True)
+        (d / "movie.mkv").write_text("x")
+
+    h = _setup(tmp_path)
+    runner = h.runner; tmdb = h.tmdb
+    tmdb.search_and_fetch.return_value = _mock_meta()
+    with h.session() as sess:
+        _add_library(sess, "Movies", str(movies_dir), "movie")
+
+    log = await runner.run_full()
+    assert log.total == 3
+    with sess:
+        assert sess.query(MediaItem).count() == 3
