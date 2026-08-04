@@ -394,6 +394,7 @@ class ScanRunner:
         self._accepting = True
         self._current_task: asyncio.Task[object] | None = None
         self._stop_requested = False
+        self._progress: list[str] = []
 
     # ------------------------------------------------------------------
     # Concurrency control
@@ -408,6 +409,7 @@ class ScanRunner:
         self._running = True
         self._current_task = asyncio.current_task()
         self._stop_requested = False
+        self._progress = []
 
     def _release(self) -> None:
         """Release the internal mutex."""
@@ -418,6 +420,15 @@ class ScanRunner:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    def _log_progress(self, line: str) -> None:
+        """Append a timestamped line to the in-memory live-progress buffer."""
+        ts = datetime.now(UTC).astimezone().strftime("%H:%M:%S")
+        self._progress.append(f"[{ts}] {line}")
+
+    def progress_lines(self, limit: int = 200) -> list[str]:
+        """Return the most recent live-progress lines (for the /scan-live page)."""
+        return self._progress[-limit:]
 
     # ------------------------------------------------------------------
     # Configuration hot-reload
@@ -521,11 +532,17 @@ class ScanRunner:
         task.cancel()
         return True
 
-    async def rescrape_item(self, item_id: int) -> MediaItem:
-        """Force re-scrape a single item (ignores existing NFO)."""
+    async def rescrape_item(
+        self, item_id: int, *, query: str | None = None, tmdb_id: int | None = None,
+    ) -> MediaItem:
+        """Force re-scrape a single item (ignores existing NFO).
+
+        ``query`` overrides the search title; ``tmdb_id`` forces a specific TMDB
+        match (both come from the manual-match dialog).
+        """
         self._claim()
         try:
-            return await self._rescrape_item_impl(item_id)
+            return await self._rescrape_item_impl(item_id, query=query, tmdb_id=tmdb_id)
         finally:
             self._release()
 
@@ -591,6 +608,7 @@ class ScanRunner:
 
             for lib in libs:
                 conn = _library_connection(lib, self._enc_key)
+                self._log_progress(f"扫描库: {lib.name} ({lib.path})")
                 try:
                     found = await _discover_folders(conn, lib)
                     # Skip paths the user deleted from the list (record only —
@@ -674,11 +692,13 @@ class ScanRunner:
                 if target is None:
                     continue
                 conn = _library_connection_from_target(target, self._enc_key)
+                self._log_progress(f"正在刮削: {target.folder_path}")
                 try:
                     result = await self._scrape_one(target, force=False, conn=conn)
                     with self._session_factory.begin() as sess:
                         _persist_result(sess, target.id, result)
                     matched += 1
+                    self._log_progress(f"成功: {target.folder_path}")
                 except TmdbAuthError as exc:
                     # Batch-fail remaining API items
                     remaining = api_queue_ids[index:]
@@ -693,6 +713,7 @@ class ScanRunner:
                         t = self._load_target(rid)
                         if t:
                             detail_lines.append(f"{t.folder_path}: {exc}")
+                    self._log_progress(f"TMDB 认证失败，批量中止剩余 {len(remaining)} 条: {exc}")
                     break  # Stop sending requests
                 except asyncio.CancelledError:
                     stop_msg = "任务已手动停止" if self._stop_requested else "任务因应用关闭而取消"
@@ -711,6 +732,7 @@ class ScanRunner:
                         t = self._load_target(rid)
                         if t:
                             detail_lines.append(f"{t.folder_path}: {stop_msg}")
+                    self._log_progress(stop_msg)
                     raise
                 except Exception as exc:  # noqa: BLE001 (item isolation — failure must not abort batch)
                     with self._session_factory.begin() as sess:
@@ -720,6 +742,7 @@ class ScanRunner:
                             item.error_message = str(exc)
                     failed += 1
                     detail_lines.append(f"{target.folder_path}: {exc}")
+                    self._log_progress(f"失败: {target.folder_path}: {exc}")
 
         except asyncio.CancelledError:
             # Handle cancellation at the top level too
@@ -738,6 +761,7 @@ class ScanRunner:
                         existing_log.matched = matched
                         existing_log.failed = failed
                         existing_log.detail = "\n".join(detail_lines) if detail_lines else None
+            self._log_progress(f"扫描完成: 总计 {total} / 成功 {matched} / 失败 {failed}")
 
         # Reload the log entry for return
         with self._session_factory() as sess:
@@ -750,14 +774,18 @@ class ScanRunner:
     # Single item rescrape
     # ------------------------------------------------------------------
 
-    async def _rescrape_item_impl(self, item_id: int) -> MediaItem:
+    async def _rescrape_item_impl(
+        self, item_id: int, *, query: str | None = None, tmdb_id: int | None = None,
+    ) -> MediaItem:
         target = self._load_target(item_id)
         if target is None:
             raise ItemNotFoundError(f"MediaItem {item_id} 不存在")
 
         # Re-parse the folder/file name with the current parser: the stored
         # parsed_title can be stale (parsed by an older parser version), which
-        # would make the search fail even after a parser fix.
+        # would make the search fail even after a parser fix.  A manual
+        # ``query``/``tmdb_id`` override takes precedence and is passed straight
+        # to _scrape_one.
         fresh = parse_folder_name(Path(target.folder_path).name)
         if fresh.title:
             target = replace(
@@ -780,11 +808,15 @@ class ScanRunner:
             log_id = log.id
 
         conn = _library_connection_from_target(target, self._enc_key)
+        self._log_progress(f"正在刮削: {target.folder_path}")
         try:
-            result = await self._scrape_one(target, force=True, conn=conn)
+            result = await self._scrape_one(
+                target, force=True, conn=conn, tmdb_id=tmdb_id, query=query,
+            )
             with self._session_factory.begin() as sess:
                 _persist_result(sess, target.id, result)
             matched = 1
+            self._log_progress(f"成功: {target.folder_path}")
             detail = f"手动重刮: {target.folder_path}"
         except Exception as exc:  # noqa: BLE001 (rescrape must not raise — convert to failed status)
             with self._session_factory.begin() as sess:
@@ -848,11 +880,13 @@ class ScanRunner:
             if target is None:
                 continue
             conn = _library_connection_from_target(target, self._enc_key)
+            self._log_progress(f"正在刮削: {target.folder_path}")
             try:
                 result = await self._scrape_one(target, force=True, conn=conn)
                 with self._session_factory.begin() as sess:
                     _persist_result(sess, target.id, result)
                 matched += 1
+                self._log_progress(f"成功: {target.folder_path}")
             except TmdbAuthError as exc:
                 remaining = ids[index:]
                 with self._session_factory.begin() as sess:
@@ -866,6 +900,7 @@ class ScanRunner:
                     t = self._load_target(rid)
                     if t:
                         detail_lines.append(f"{t.folder_path}: {exc}")
+                self._log_progress(f"TMDB 认证失败，批量中止剩余 {len(remaining)} 条: {exc}")
                 break  # Stop sending requests
             except asyncio.CancelledError:
                 stop_msg = "任务已手动停止" if self._stop_requested else "任务因应用关闭而取消"
@@ -881,6 +916,7 @@ class ScanRunner:
                     t = self._load_target(rid)
                     if t:
                         detail_lines.append(f"{t.folder_path}: {stop_msg}")
+                self._log_progress(stop_msg)
                 raise
             except Exception as exc:  # noqa: BLE001 (item isolation — failure must not abort batch)
                 with self._session_factory.begin() as sess:
@@ -890,6 +926,7 @@ class ScanRunner:
                         item.error_message = str(exc)
                 failed += 1
                 detail_lines.append(f"{target.folder_path}: {exc}")
+                self._log_progress(f"失败: {target.folder_path}: {exc}")
             finally:
                 await conn.aclose()
 
@@ -902,6 +939,7 @@ class ScanRunner:
                     existing_log.matched = matched
                     existing_log.failed = failed
                     existing_log.detail = "\n".join(detail_lines) if detail_lines else None
+            self._log_progress(f"重刮失败项完成: 总计 {total} / 成功 {matched} / 失败 {failed}")
 
         with self._session_factory() as sess:
             final_log = sess.get(ScrapeLog, log_id)
@@ -990,10 +1028,13 @@ class ScanRunner:
 
     async def _scrape_one(
         self, target: ScrapeTarget, *, force: bool, conn: Connection,
+        tmdb_id: int | None = None, query: str | None = None,
     ) -> ScrapeResult:
         """Scrape a single item.  ``force`` bypasses NFO skip.
 
-        Raises on failure; the caller persists the result or marks failed.
+        ``tmdb_id`` forces a specific TMDB id (manual match); ``query`` searches
+        that query instead of the parsed title.  Raises on failure; the caller
+        persists the result or marks failed.
         """
         rel_folder = _relative_folder(target.folder_path, target.library_path)
 
@@ -1006,26 +1047,35 @@ class ScanRunner:
         ):
             return ExistingNfoMatched()
 
-        # Step 2: must have a title
-        if not target.parsed_title:
+        # Step 2: must have a title (unless a manual override is provided)
+        if tmdb_id is None and not query and not target.parsed_title:
             raise ScrapeError("标题解析为空，无法搜索")
 
         # Step 3: TMDB search + detail
-        meta = await self._tmdb.search_and_fetch(
-            target.parsed_title, target.parsed_year, target.media_type,
-        )
-        if meta is None:
-            raise ScrapeError("TMDB 无搜索结果")
+        if tmdb_id is not None:
+            meta = await self._tmdb.fetch_by_id(tmdb_id, target.media_type)
+        else:
+            search_title = query if query else target.parsed_title
+            if not search_title:
+                raise ScrapeError("标题解析为空，无法搜索")
+            found = await self._tmdb.search_and_fetch(
+                search_title,
+                None if query else target.parsed_year,
+                target.media_type,
+            )
+            if found is None:
+                raise ScrapeError("TMDB 无搜索结果")
+            meta = found
 
         # Step 4: Douban supplement
         if self._config.use_douban and self._douban:
             try:
                 supp = await self._douban.fetch_supplement(
-                    target.parsed_title, meta.year,
+                    meta.title, meta.year,
                 )
             except Exception:
                 logger.warning(
-                    "豆瓣模块异常(%s)", target.parsed_title, exc_info=True,
+                    "豆瓣模块异常(%s)", meta.title, exc_info=True,
                 )
                 supp = None
 

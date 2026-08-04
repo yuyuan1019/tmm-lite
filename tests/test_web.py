@@ -112,6 +112,17 @@ def test_rescrape_404(client: TestClient) -> None:
     assert resp.status_code == 404
 
 
+def test_rescrape_404_with_manual_query(client: TestClient) -> None:
+    resp = client.post("/items/999/rescrape", data={"query": "Test Title"})
+    assert resp.status_code == 404
+
+
+def test_api_search_empty_title(client: TestClient) -> None:
+    resp = client.get("/api/search?title=&media_type=movie")
+    assert resp.status_code == 200
+    assert resp.json()["items"] == []
+
+
 # ---------------------------------------------------------------------------
 # M9-T4b: manual subtitle
 # ---------------------------------------------------------------------------

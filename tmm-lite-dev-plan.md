@@ -430,6 +430,8 @@ class ScrapeScheduler:
 | POST `/libraries/add` | 新增库 | 303 回列表 | path 非绝对/重复/为空、类型非法或任务运行中 → 303 + 错误提示 |
 | POST `/libraries/{id}/delete` | 删库（级联删条目，不动磁盘） | 303 | id 不存在 → 404 |
 | GET `/items` | 条目表格，支持 `?status=` 过滤 | 200 | — |
+| GET `/scan-live` | 实时刮削日志页 | 200 | 运行中自动刷新 |
+| GET `/api/search` | 手动匹配候选搜索 | JSON | title 空 → 空列表；media_type 非法 → 400 |
 | POST `/items/{id}/rescrape` | 单条目重刮 | 303 回 `/items` | 运行中 → 提示；id 不存在 → 404 |
 | POST `/items/{id}/subtitle` | 单条目手动字幕 | 303 回 `/items` | 命中 → 成功提示；未命中/未启用/运行中 → 错误提示；id 不存在 → 404 |
 | POST `/items/{id}/delete` | 删除记录（不删文件，路径进忽略列表） | 303 回 `/items` | 运行中 → 提示；id 不存在 → 404 |

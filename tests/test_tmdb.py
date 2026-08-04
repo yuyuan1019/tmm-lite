@@ -390,3 +390,39 @@ def test_rate_limiter_zero_is_noop() -> None:
     start = time.monotonic()
     asyncio.run(limiter.wait())
     assert time.monotonic() - start < 0.05
+
+
+# ---------------------------------------------------------------------------
+# Manual-match helpers: search_candidates / fetch_by_id
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_search_candidates(tmdb: TmdbScraper) -> None:
+    with respx.mock as mock:
+        mock.get("https://api.themoviedb.org/3/search/movie").respond(json={
+            "results": [
+                {"id": 1, "title": "A", "original_title": "AA",
+                 "release_date": "2020-05-01", "poster_path": "/a.jpg"},
+                {"id": 2, "title": "B", "original_title": "BB",
+                 "release_date": "2021-05-01", "poster_path": None},
+            ],
+        })
+        items = await tmdb.search_candidates("test", "movie")
+
+    assert len(items) == 2
+    assert items[0]["id"] == 1
+    assert items[0]["year"] == "2020"
+    assert items[0]["poster"].startswith("http")
+    assert items[1]["poster"] is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_by_id(tmdb: TmdbScraper) -> None:
+    with respx.mock as mock:
+        mock.get("https://api.themoviedb.org/3/movie/157336").respond(
+            json=_json("tmdb_movie_detail.json"),
+        )
+        result = await tmdb.fetch_by_id(157336, "movie")
+
+    assert result is not None
+    assert result.source_id == "157336"
+    assert result.imdb_id == "tt0816692"

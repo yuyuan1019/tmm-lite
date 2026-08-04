@@ -30,6 +30,7 @@ class ScrapeScheduler:
             timezone=os.environ.get("TZ", "Asia/Shanghai"),
         )
         self._started = False
+        self._paused = False
         self._cron: str | None = None
 
     # ------------------------------------------------------------------
@@ -50,6 +51,7 @@ class ScrapeScheduler:
         )
         self._scheduler.start()
         self._started = True
+        self._paused = False
         logger.info("Scheduler started: %s", cron)
 
     def reschedule(self, cron: str) -> None:
@@ -65,9 +67,23 @@ class ScrapeScheduler:
             logger.info("Scheduler rescheduled: %s", cron)
 
     def pause(self) -> None:
-        """Temporarily pause scheduling (shutdown precursor)."""
-        if self._started:
+        """Pause scheduling (the cron job stops firing)."""
+        if self._started and not self._paused:
             self._scheduler.pause()
+            self._paused = True
+            logger.info("Scheduler paused")
+
+    def resume(self) -> None:
+        """Resume scheduling after :meth:`pause`."""
+        if self._started and self._paused:
+            self._scheduler.resume()
+            self._paused = False
+            logger.info("Scheduler resumed")
+
+    @property
+    def paused(self) -> bool:
+        """True when the scheduler has been paused (cron disabled)."""
+        return self._paused
 
     async def shutdown(self) -> None:
         """Wait for the running job (if any) and stop the scheduler."""

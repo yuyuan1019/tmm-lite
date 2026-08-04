@@ -101,3 +101,25 @@ def test_not_started_mode(mock_runner: MagicMock) -> None:
 
     # pause is safe
     s.pause()
+
+
+# ---------------------------------------------------------------------------
+# M8-T7: Pause / resume toggles the scheduler on/off
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_pause_resume(scheduler: ScrapeScheduler) -> None:
+    scheduler.start("0 4 * * *")
+    assert not scheduler.paused
+
+    scheduler.pause()
+    assert scheduler.paused
+
+    scheduler.resume()
+    assert not scheduler.paused
+
+    # Double-pause/resume is safe
+    scheduler.pause()
+    scheduler.pause()
+    assert scheduler.paused
+    scheduler.resume()
+    assert not scheduler.paused

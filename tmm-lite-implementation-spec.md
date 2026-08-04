@@ -142,6 +142,7 @@ def get_data_dir() -> Path:
 | `overwrite_existing_nfo` | bool | `false` | — |
 | `language` | str | `"zh-CN"` | 非空 |
 | `schedule_cron` | str | `"0 4 * * *"` | 必须恰好 5 段，且 `CronTrigger.from_crontab()` 可解析 |
+| `scheduler_enabled` | bool | `true` | 定时任务开关；启动时 false 则 `pause()`，设置页可改 |
 | `libraries` | list | `[]` | 每项含 name/path/type，type ∈ {movie, tv}；仅首次导入用 |
 
 ### 3.2 行为矩阵
@@ -886,6 +887,12 @@ redirect("/?ok=任务已启动")
 `/items` 页顶部在忽略列表非空时显示「已忽略 N 条 … 清空忽略列表」；每行操作列新增「删除」按钮（`onsubmit` 二次确认）。
 
 **GET `/logs`（logs.html）**：ScrapeLog 倒序前 50 条；列＝开始/结束(本地时间)/耗时/total/matched/failed/detail（折叠展开）。
+
+**GET `/scan-live`（scan_live.html）**：实时刮削日志。`ScanRunner` 维护进程内 `_progress` 环形缓冲（`_claim()` 时清空，`_log_progress` 追加「扫描库 / 正在刮削 / 成功 / 失败 / 完成汇总」），`progress_lines()` 供页面读取。运行中页面 `<meta http-equiv=refresh content=2>` 自动刷新，含「停止」按钮。单进程内 list append + 同步读，无竞态。
+
+**GET `/api/search?title=&media_type=`**：手动匹配弹窗的候选搜索，调 `tmdb.search_candidates()`（返回 id/title/original_title/year/poster 列表）。title 为空 → `{"items":[]}`；media_type 非法 → 400。
+
+**POST `/items/{id}/rescrape`** 扩展：接受表单 `query`（手动搜索标题）与 `tmdb_id`（强制指定 TMDB id）。`runner.rescrape_item(item_id, query=?, tmdb_id=?)` → `_scrape_one` 里 `tmdb_id` 走 `fetch_by_id`（跳过搜索），`query` 覆盖解析标题搜索，均不依赖解析出的标题。items 页「重新刮削」改为弹窗：预填标题 → `/api/search` 出候选 → 选一条（POST tmdb_id）或改标题直接重刮（POST query）。
 
 **GET `/settings`（settings.html）** 表单字段（name 属性固定）：
 | name | 控件 | 回显 |

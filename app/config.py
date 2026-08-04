@@ -92,6 +92,7 @@ class AppConfig:
     overwrite_existing_nfo: bool = False
     language: str = "zh-CN"
     schedule_cron: str = "0 4 * * *"
+    scheduler_enabled: bool = True
     subtitle_enabled: bool = True
     opensubtitles_api_key: str = ""
     subtitle_languages: str = "chi,zho,zh"  # ISO 639-2, comma-separated
@@ -118,6 +119,7 @@ _ALLOWED_SAVE_KEYS = frozenset({
     "overwrite_existing_nfo",
     "language",
     "schedule_cron",
+    "scheduler_enabled",
     "subtitle_enabled",
     "opensubtitles_api_key",
     "subtitle_languages",
@@ -137,6 +139,7 @@ _DEFAULTS: dict[str, object] = {
     "overwrite_existing_nfo": False,
     "language": "zh-CN",
     "schedule_cron": "0 4 * * *",
+    "scheduler_enabled": True,
     "subtitle_enabled": True,
     "opensubtitles_api_key": "",
     "subtitle_languages": "chi,zho,zh",
@@ -219,6 +222,9 @@ def _validate_config_values(raw: dict[str, object]) -> None:
             if not isinstance(value, str):
                 raise ConfigError(f"schedule_cron 必须是字符串: {type(value).__name__}")
             validate_cron(value)
+        elif key == "scheduler_enabled":
+            if not isinstance(value, bool):
+                raise ConfigError(f"scheduler_enabled 必须是布尔值: {type(value).__name__}")
         elif key == "libraries":
             if not isinstance(value, list):
                 raise ConfigError(f"libraries 必须是列表: {type(value).__name__}")
@@ -283,7 +289,8 @@ def load_config(path: Path | None = None) -> AppConfig:
     known_keys = {
         "tmdb_api_key", "use_douban", "douban_delay_seconds",
         "tmdb_delay_seconds",
-        "overwrite_existing_nfo", "language", "schedule_cron", "libraries",
+        "overwrite_existing_nfo", "language", "schedule_cron",
+        "scheduler_enabled", "libraries",
         "subtitle_enabled", "opensubtitles_api_key", "subtitle_languages",
         "browse_root", "proxy",
     }
@@ -297,6 +304,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         overwrite_existing_nfo=bool(raw.get("overwrite_existing_nfo", _DEFAULTS["overwrite_existing_nfo"])),
         language=str(raw.get("language", _DEFAULTS["language"])),
         schedule_cron=str(raw.get("schedule_cron", _DEFAULTS["schedule_cron"])),
+        scheduler_enabled=bool(raw.get("scheduler_enabled", _DEFAULTS["scheduler_enabled"])),
         subtitle_enabled=bool(raw.get("subtitle_enabled", _DEFAULTS["subtitle_enabled"])),
         opensubtitles_api_key=str(raw.get("opensubtitles_api_key", _DEFAULTS["opensubtitles_api_key"])),
         subtitle_languages=str(raw.get("subtitle_languages", _DEFAULTS["subtitle_languages"])),
@@ -362,6 +370,7 @@ def save_config(updates: dict[str, object], path: Path | None = None) -> AppConf
         "overwrite_existing_nfo": existing.overwrite_existing_nfo,
         "language": existing.language,
         "schedule_cron": existing.schedule_cron,
+        "scheduler_enabled": existing.scheduler_enabled,
         "subtitle_enabled": existing.subtitle_enabled,
         "opensubtitles_api_key": existing.opensubtitles_api_key,
         "subtitle_languages": existing.subtitle_languages,

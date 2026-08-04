@@ -127,6 +127,8 @@ def create_app(
         scheduler = ScrapeScheduler(runner)
         if start_scheduler:
             scheduler.start(config.schedule_cron)
+            if not config.scheduler_enabled:
+                scheduler.pause()
 
         # Store on app state
         app.state.config = config
@@ -218,6 +220,7 @@ def create_app(
                     "counts": counts,
                     "is_running": runner.is_running,
                     "next_run_time": _format_time(scheduler.next_run_time),
+                    "scheduler_paused": scheduler.paused,
                     "last_log": last_log,
                     "key_warning": key_warning,
                     "ok": unquote(request.query_params.get("ok", "")),
@@ -463,8 +466,14 @@ def create_app(
     @app.post("/items/{item_id}/rescrape")
     async def items_rescrape(request: Request, item_id: int) -> Any:
         runner: ScanRunner = request.app.state.runner
+        form = await request.form()
+        query = str(form.get("query", "")).strip()
+        tmdb_id_str = str(form.get("tmdb_id", "")).strip()
+        tmdb_id = int(tmdb_id_str) if tmdb_id_str.isdigit() else None
         try:
-            result = await runner.rescrape_item(item_id)
+            result = await runner.rescrape_item(
+                item_id, query=query or None, tmdb_id=tmdb_id,
+            )
             return _redirect(
                 "/items",
                 ok=f"已完成重新刮削: {result.status}",
@@ -473,6 +482,25 @@ def create_app(
             return _redirect("/items", err="任务正在运行中")
         except ItemNotFoundError:
             return JSONResponse({"detail": "item not found"}, status_code=404)
+
+    # ------------------------------------------------------------------
+    # GET /api/search — TMDB candidates for the manual-match dialog
+    # ------------------------------------------------------------------
+
+    @app.get("/api/search")
+    async def api_search(
+        request: Request, title: str = "", media_type: str = "movie",
+    ) -> Any:
+        if not title.strip():
+            return {"items": []}
+        if media_type not in ("movie", "tv"):
+            return JSONResponse({"error": "media_type 无效", "items": []}, status_code=400)
+        tmdb = request.app.state.tmdb
+        try:
+            items = await tmdb.search_candidates(title.strip(), media_type)
+        except Exception as exc:  # noqa: BLE001 (search is best-effort)
+            return JSONResponse({"error": str(exc), "items": []}, status_code=500)
+        return {"items": items}
 
     # ------------------------------------------------------------------
     # POST /items/{id}/subtitle
@@ -562,6 +590,22 @@ def create_app(
             sess.close()
 
     # ------------------------------------------------------------------
+    # GET /scan-live — real-time progress of the currently running scan
+    # ------------------------------------------------------------------
+
+    @app.get("/scan-live")
+    async def scan_live(request: Request) -> Any:
+        runner: ScanRunner = request.app.state.runner
+        return _render(
+            "scan_live.html",
+            {
+                "request": request,
+                "is_running": runner.is_running,
+                "lines": runner.progress_lines(),
+            },
+        )
+
+    # ------------------------------------------------------------------
     # GET /settings
     # ------------------------------------------------------------------
 
@@ -603,6 +647,7 @@ def create_app(
         tmdb_delay_str = str(form.get("tmdb_delay_seconds", "0.5"))
         overwrite = form.get("overwrite_existing_nfo") == "on"
         cron_str = str(form.get("schedule_cron", "0 4 * * *"))
+        scheduler_enabled = form.get("scheduler_enabled") == "on"
         subtitle_enabled = form.get("subtitle_enabled") == "on"
         os_api_key = str(form.get("opensubtitles_api_key", ""))
         subtitle_langs = str(form.get("subtitle_languages", "chi,zho,zh"))
@@ -643,6 +688,7 @@ def create_app(
                 "tmdb_delay_seconds": tmdb_delay,
                 "overwrite_existing_nfo": overwrite,
                 "schedule_cron": cron_str,
+                "scheduler_enabled": scheduler_enabled,
                 "subtitle_enabled": subtitle_enabled,
                 "subtitle_languages": subtitle_langs.strip(),
                 "browse_root": browse_root,
@@ -674,6 +720,10 @@ def create_app(
             # Apply to running objects (commit point)
             try:
                 request.app.state.scheduler.reschedule(cron_str)
+                if new_config.scheduler_enabled:
+                    request.app.state.scheduler.resume()
+                else:
+                    request.app.state.scheduler.pause()
                 old_tmdb, old_douban = runner.reconfigure(new_config, new_tmdb, new_douban)
 
                 # Recreate subtitle downloader
@@ -695,6 +745,7 @@ def create_app(
                     "tmdb_delay_seconds": old_config.tmdb_delay_seconds,
                     "overwrite_existing_nfo": old_config.overwrite_existing_nfo,
                     "schedule_cron": old_cron,
+                    "scheduler_enabled": old_config.scheduler_enabled,
                     "language": old_config.language,
                     "subtitle_enabled": old_config.subtitle_enabled,
                     "opensubtitles_api_key": old_config.opensubtitles_api_key,

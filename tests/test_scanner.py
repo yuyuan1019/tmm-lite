@@ -1825,3 +1825,53 @@ async def test_rescrape_failed_no_failed_items(tmp_path: Path) -> None:
     assert log.total == 0
     assert log.matched == 0
     tmdb.search_and_fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rescrape_item_with_query_override(tmp_path: Path) -> None:
+    """A manual query overrides the (bad) parsed title for the search."""
+    movies_dir = tmp_path / "movies"
+    d = movies_dir / "Bad Name (2020)"
+    d.mkdir(parents=True)
+    (d / "movie.mkv").write_text("x")
+
+    h = _setup(tmp_path)
+    runner = h.runner; tmdb = h.tmdb
+    tmdb.search_and_fetch.return_value = _mock_meta(title="Correct")
+    with h.session() as sess:
+        lib = _add_library(sess, "Movies", str(movies_dir), "movie")
+        item_id = _add_item(sess, lib, str(d), "Bad Name", 2020)
+
+    await runner.rescrape_item(item_id, query="Correct Title")
+
+    assert tmdb.search_and_fetch.await_args.args[0] == "Correct Title"
+
+
+@pytest.mark.asyncio
+async def test_rescrape_item_with_tmdb_id(tmp_path: Path) -> None:
+    """A manual tmdb_id forces fetching that specific id (no search)."""
+    from app.scrapers.base import ScrapedMeta
+
+    movies_dir = tmp_path / "movies"
+    d = movies_dir / "Bad (2020)"
+    d.mkdir(parents=True)
+    (d / "movie.mkv").write_text("x")
+
+    h = _setup(tmp_path)
+    runner = h.runner; tmdb = h.tmdb
+
+    async def _fake_fetch_by_id(tid: int, media_type: str) -> ScrapedMeta:
+        return ScrapedMeta(
+            source="tmdb", source_id=str(tid), title="Matched",
+            original_title="Matched", year=2020, overview="", rating=0, genres=[],
+        )
+
+    tmdb.fetch_by_id = AsyncMock(side_effect=_fake_fetch_by_id)
+    with h.session() as sess:
+        lib = _add_library(sess, "Movies", str(movies_dir), "movie")
+        item_id = _add_item(sess, lib, str(d), "Bad", 2020)
+
+    await runner.rescrape_item(item_id, tmdb_id=42)
+
+    assert tmdb.fetch_by_id.await_args.args[0] == 42
+    tmdb.search_and_fetch.assert_not_awaited()  # forced id bypasses search

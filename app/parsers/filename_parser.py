@@ -77,6 +77,11 @@ _RE_EPISODE_CN = re.compile(
     r"第(\d{1,4})[集话]"
 )
 
+# Chinese season marker: "第1季", "第03季"
+_RE_SEASON_CN = re.compile(
+    r"第(\d{1,2})季"
+)
+
 # Bracket-wrapped year: (2014) or （2014）
 _RE_BRACKET_YEAR = re.compile(
     r"[（(](?P<year>(?:19|20)\d{2})[)）]"
@@ -96,17 +101,22 @@ _RE_RELEASE_GROUP = re.compile(
 # Matches digits + separator ONLY when the following title starts with a CJK
 # character, so "50.First.Dates" (Latin) and "2012" (no separator) are untouched.
 _RE_LEADING_INDEX = re.compile(
-    r"^\d{1,4}[.．、_]\s*(?=[一-鿿])"
+    r"^\d{1,4}[.．、_]+\s*(?=[一-鿿])"
 )
 
 # Brackets containing noise (【】or [])
 _RE_SQUARE_BRACKET = re.compile(r"【[^】]*】|\[[^\]]*\]")
 
 # Chinese season-count marker in download-site names: "黑镜 Black Mirror[全7季]"
-_RE_SEASON_COUNT = re.compile(r"全\d{1,3}季")
+# Also handles Chinese numerals: "全十一季", "全十二季"
+_RE_SEASON_COUNT = re.compile(r"全(?:\d{1,3}|[一二三四五六七八九十百千]+)季")
 
 # Chars to replace with space
 _RE_DOT_UNDERSCORE = re.compile(r"[._]+")
+
+# Leftover unmatched brackets / punctuation at title boundaries after year extraction
+# ("美国队长1 复仇者先锋(" → "美国队长1 复仇者先锋")
+_RE_TRAILING_JUNK = re.compile(r"^[\s.（(（\[【]+|[\s.)）)】\]】]+$")
 
 
 # ---------------------------------------------------------------------------
@@ -169,10 +179,14 @@ def _parse_impl(name: str) -> ParsedName:
         season = int(m_se.group(1))
         episode = int(m_se.group(2))
     else:
-        # Try season-only
+        # Try season-only (English + Chinese)
         m_s = _RE_SEASON_ONLY.search(work)
         if m_s:
             season = int(m_s.group(1) if m_s.group(1) else m_s.group(2))
+        if season is None:
+            m_scn = _RE_SEASON_CN.search(work)
+            if m_scn:
+                season = int(m_scn.group(1))
         # Try Chinese episode
         m_e = _RE_EPISODE_CN.search(work)
         if m_e:
@@ -211,6 +225,7 @@ def _parse_impl(name: str) -> ParsedName:
             rf"[Ss]{season:02d}[Ee]\d{{2,3}}",  # e.g. S01E02
             rf"Season[ ._]?{season:02d}",        # e.g. Season 01
             rf"[Ss]{season:02d}(?![Ee]\d)",       # standalone S01
+            rf"第0*{season}季",                   # Chinese "第03季"
         ])
     if episode is not None:
         title_region = _remove_patterns(title_region, [
@@ -267,6 +282,10 @@ def _clean_title(region: str) -> str | None:
     region = _RE_DOT_UNDERSCORE.sub(" ", region)
     # Collapse multiple whitespace
     region = re.sub(r"\s+", " ", region).strip()
+
+    # Step 7g: strip leftover unmatched brackets/punctuation from both ends
+    # ("美国队长1 复仇者先锋(" → "美国队长1 复仇者先锋")
+    region = _RE_TRAILING_JUNK.sub("", region).strip()
 
     return region if region else None
 

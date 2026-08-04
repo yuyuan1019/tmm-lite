@@ -101,6 +101,42 @@ class TmdbScraper:
             meta.imdb_id = _str_or_none(ext.get("imdb_id"))
         return meta
 
+    async def fetch_by_id(self, tmdb_id: int, media_type: str) -> ScrapedMeta:
+        """Fetch and map metadata for a specific TMDB id (manual match)."""
+        self._check_key()
+        detail = await self._detail(tmdb_id, media_type)
+        meta = self._map_to_meta(media_type, detail)
+        if meta.imdb_id is None:
+            ext = await self._external_ids(tmdb_id, media_type)
+            meta.imdb_id = _str_or_none(ext.get("imdb_id"))
+        return meta
+
+    async def search_candidates(
+        self, title: str, media_type: str, limit: int = 8,
+    ) -> list[dict[str, object]]:
+        """Return up to *limit* TMDB search candidates for the manual-match dialog."""
+        self._check_key()
+        endpoint = "/search/movie" if media_type == "movie" else "/search/tv"
+        data = await self._get_json(endpoint, self._params(query=title))
+        raw_results = data.get("results", [])
+        results = raw_results if isinstance(raw_results, list) else []
+        date_field = "release_date" if media_type == "movie" else "first_air_date"
+        candidates: list[dict[str, object]] = []
+        for r in results[:limit]:
+            if not isinstance(r, dict):
+                continue
+            date_str = _str_or_none(r.get(date_field))
+            year = date_str[:4] if date_str and len(date_str) >= 4 else ""
+            poster = r.get("poster_path")
+            candidates.append({
+                "id": r.get("id"),
+                "title": r.get("title") or r.get("name") or "",
+                "original_title": r.get("original_title") or r.get("original_name"),
+                "year": year,
+                "poster": (IMAGE_BASE + poster) if isinstance(poster, str) else None,
+            })
+        return candidates
+
     async def fetch_image(self, url: str) -> bytes:
         """Download an image from *url* and return its raw bytes.
 

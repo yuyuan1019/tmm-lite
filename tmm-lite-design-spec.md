@@ -303,6 +303,8 @@ Web 页面对某一行点击"重新刮削"，只对该条目重复步骤 7.1 第
 | POST | `/items/{id}/delete` | 删除当前记录（仅删记录，不删磁盘文件；路径记入忽略列表） |
 | POST | `/items/clear-ignored` | 清空忽略列表 |
 | GET | `/logs` | 任务日志页 |
+| GET | `/scan-live` | 实时刮削日志页（运行中自动刷新） |
+| GET | `/api/search` | 手动匹配弹窗的 TMDB 候选搜索 |
 | GET | `/settings` | 设置页 |
 | POST | `/settings` | 保存设置（TMDB key/清除 key / 豆瓣开关 / 间隔 / cron / 覆盖已有 NFO 开关） |
 | GET | `/healthz` | Docker 健康检查，返回 `{"status":"ok"}` |

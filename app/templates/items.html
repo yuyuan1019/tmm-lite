@@ -40,9 +40,9 @@
   <td><span class="badge badge-{{ item.status }}">{{ item.status }}</span></td>
   <td title="{{ item.error_message or '' }}">{{ (item.error_message or '')[:50] }}</td>
   <td>
-    <form method="post" action="/items/{{ item.id }}/rescrape">
-      <button type="submit" {% if is_running %}disabled{% endif %}>重新刮削</button>
-    </form>
+    <button type="button" {% if is_running %}disabled{% endif %}
+            onclick="openRescrape(this, {{ item.id }}, '{{ item.media_type }}')"
+            data-title="{{ item.parsed_title or '' }}">重新刮削</button>
     <form method="post" action="/items/{{ item.id }}/subtitle">
       <button type="submit" {% if is_running %}disabled{% endif %} title="手动下载字幕">字幕</button>
     </form>
@@ -55,4 +55,79 @@
 {% endfor %}
 </tbody>
 </table>
+
+<!-- 重新刮削：手动搜索匹配弹窗 -->
+<div id="rescrape_modal" style="display:none; position:fixed; top:8%; left:15%; width:70%; max-width:720px; height:80%; background:white; border:2px solid #2c3e50; border-radius:8px; z-index:1000; overflow:auto; padding:16px;">
+  <div style="display:flex; justify-content:space-between; margin-bottom:12px;">
+    <h3 style="margin:0">重新刮削 — 手动匹配</h3>
+    <button type="button" onclick="closeRescrape()">✕ 关闭</button>
+  </div>
+  <label style="display:flex; gap:8px; margin-bottom:8px;">
+    搜索标题：<input type="text" id="rescrape_title" style="flex:1;" placeholder="输入标题搜索 TMDB">
+  </label>
+  <div style="margin-bottom:12px;">
+    <button type="button" onclick="searchRescrape()">🔍 搜索</button>
+    <button type="button" onclick="submitQueryRescrape()" style="background:#27ae60;">用此标题直接重刮</button>
+  </div>
+  <div id="rescrape_results" style="max-height:55vh; overflow-y:auto; border-top:1px solid #eee;"></div>
+</div>
+
+<script>
+var rescrapeItemId = null;
+var rescrapeType = 'movie';
+
+function openRescrape(btn, itemId, mediaType) {
+  rescrapeItemId = itemId;
+  rescrapeType = mediaType;
+  var title = btn.getAttribute('data-title') || '';
+  document.getElementById('rescrape_title').value = title;
+  document.getElementById('rescrape_modal').style.display = 'block';
+  searchRescrape(); // auto-search with the current title
+}
+function closeRescrape() { document.getElementById('rescrape_modal').style.display = 'none'; }
+
+function searchRescrape() {
+  var t = document.getElementById('rescrape_title').value.trim();
+  var box = document.getElementById('rescrape_results');
+  if (!t) { box.innerHTML = '<p><em>请输入标题</em></p>'; return; }
+  box.innerHTML = '<p>搜索中…</p>';
+  fetch('/api/search?title=' + encodeURIComponent(t) + '&media_type=' + rescrapeType)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) { box.innerHTML = '<p style="color:red">' + data.error + '</p>'; return; }
+      if (!data.items || !data.items.length) { box.innerHTML = '<p><em>无搜索结果</em></p>'; return; }
+      var html = '';
+      data.items.forEach(function(it) {
+        var poster = it.poster
+          ? '<img src="' + it.poster + '" style="width:40px; height:56px; object-fit:cover; border-radius:3px; margin-right:10px; vertical-align:middle;">'
+          : '';
+        html += '<div style="padding:8px; border-bottom:1px solid #eee; display:flex; align-items:center;">'
+          + poster
+          + '<div style="flex:1;">' + (it.title || '') + ' <small style="color:#888;">(' + (it.year || '') + ')</small>'
+          + '<div style="font-size:12px; color:#999;">' + (it.original_title || '') + '</div></div>'
+          + '<button type="button" onclick="chooseRescrape(' + it.id + ')" style="font-size:12px;">选择</button>'
+          + '</div>';
+      });
+      box.innerHTML = html;
+    })
+    .catch(function(err) { box.innerHTML = '<p style="color:red">搜索失败: ' + err + '</p>'; });
+}
+
+function _rescrapeForm(extra) {
+  var f = document.createElement('form');
+  f.method = 'post'; f.action = '/items/' + rescrapeItemId + '/rescrape';
+  for (var k in extra) {
+    var inp = document.createElement('input'); inp.type = 'hidden'; inp.name = k; inp.value = extra[k];
+    f.appendChild(inp);
+  }
+  document.body.appendChild(f);
+  f.submit();
+}
+function chooseRescrape(tmdbId) { _rescrapeForm({ tmdb_id: tmdbId }); }
+function submitQueryRescrape() {
+  var t = document.getElementById('rescrape_title').value.trim();
+  if (!t) { alert('请输入标题'); return; }
+  _rescrapeForm({ query: t });
+}
+</script>
 {% endblock %}

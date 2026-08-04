@@ -53,7 +53,7 @@
 </div>
 
 <div class="info">
-  <p>下次定时任务：{{ next_run_time }}</p>
+  <p>定时任务：{% if scheduler_paused %}已暂停{% else %}下次 {{ next_run_time }}{% endif %}</p>
   {% if last_log %}
   <p>最近一次任务：{{ last_log.started_at | localtime }} —
      总计 {{ last_log.total }} / 成功 {{ last_log.matched }} / 失败 {{ last_log.failed }}</p>

@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+{% if is_running %}<meta http-equiv="refresh" content="2">{% endif %}
+<h1>实时刮削日志</h1>
+
+<div class="info">
+  <p>状态：{% if is_running %}运行中（每 2 秒自动刷新）{% else %}空闲{% endif %}
+  {% if is_running %}
+  <form method="post" action="/stop-scrape" style="display:inline; margin-left:12px;">
+    <button type="submit" style="background:#c0392b;">停止</button>
+  </form>
+  {% endif %}</p>
+</div>
+
+<div style="background:#1e1e1e; color:#e0e0e0; padding:12px; border-radius:6px; font-family:ui-monospace, Consolas, monospace; font-size:13px; max-height:70vh; overflow-y:auto; white-space:pre-wrap; word-break:break-all;">
+{% if lines %}
+{% for line in lines %}{{ line }}
+{% endfor %}
+{% else %}<em style="color:#888;">暂无日志。点击仪表盘「立即执行一次」或「重新刮削失败项」开始。</em>{% endif %}
+</div>
+{% endblock %}
