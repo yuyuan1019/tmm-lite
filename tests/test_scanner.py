@@ -1875,3 +1875,19 @@ async def test_rescrape_item_with_tmdb_id(tmp_path: Path) -> None:
 
     assert tmdb.fetch_by_id.await_args.args[0] == 42
     tmdb.search_and_fetch.assert_not_awaited()  # forced id bypasses search
+
+
+# ---------------------------------------------------------------------------
+# Subtitle-status detection (display)
+# ---------------------------------------------------------------------------
+def test_detect_subtitle_summary() -> None:
+    from app.scanner import detect_subtitle_summary
+
+    assert detect_subtitle_summary(["movie.mkv", "poster.jpg"]) is None
+    assert detect_subtitle_summary(["movie.zh-Hans.srt"]) == "简体中文"
+    assert detect_subtitle_summary(["movie.chs.ass"]) == "简体中文"
+    assert detect_subtitle_summary(["movie.简体中文.srt"]) == "简体中文"
+    assert detect_subtitle_summary(["movie.zh-Hant.srt"]) == "繁体中文"
+    assert detect_subtitle_summary(["movie.zh.srt"]) == "中文"
+    assert detect_subtitle_summary(["movie.eng.srt"]) == "有字幕(非中文)"
+    assert detect_subtitle_summary(["movie.srt"]) == "有字幕(非中文)"

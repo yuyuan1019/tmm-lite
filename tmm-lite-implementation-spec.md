@@ -870,7 +870,8 @@ redirect("/?ok=任务已启动")
 
 **GET `/items`（items.html）**：
 - Query 参数 `status`（可选，五值之一，非法值忽略）。
-- 表格列：ID / 识别标题(parsed_title, manual_needed 时红字显示原文件名/文件夹名) / 年份 / 类型 / 匹配标题 / 评分 / 状态徽标 / 失败原因(error_message, title 属性放全文) / 操作(重新刮削 + 字幕按钮)。
+- 表格列：ID / 识别标题(parsed_title, manual_needed 时红字显示原文件名/文件夹名) / 原始路径(缩略可展开) / 年份 / 类型 / 匹配标题 / 评分 / **字幕** / 状态徽标 / 失败原因(error_message, title 属性放全文) / 操作(重新刮削 + 字幕按钮 + 删除)。
+- **字幕列**：`/items` 路由按库分组复用连接，逐条目 `_detect_subtitle_summary_async` 列目录 → `detect_subtitle_summary()` 按扩展名（srt/ass/ssa/sub/vtt/idx/sup）过滤并分类：`简体中文`/`繁体中文`/`中文`/`有字幕(非中文)`/空（无字幕）。含中文字幕显示绿色徽标，其余灰色。
 - 状态徽标颜色：pending 灰、matched 绿、failed 红、manual_needed 橙、missing 深灰。
 - 顶部过滤 tab：全部 + 五状态，显示各自计数。
 

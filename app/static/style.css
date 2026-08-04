@@ -41,6 +41,7 @@ th { background: #f8f9fa; font-weight: 600; }
 .badge-missing { background: #ced4da; color: #495057; }
 
 .text-warn { color: #856404; }
+.text-muted { color: #aaa; }
 
 form { margin-bottom: 16px; }
 fieldset { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px; background: white; }

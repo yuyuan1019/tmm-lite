@@ -12,7 +12,7 @@ import asyncio
 import logging
 import os
 import re
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -167,6 +167,55 @@ def _image_rel(rel: str, kind: str) -> str:
         return str(PurePosixPath(rel).with_name(PurePosixPath(rel).stem + suffix))
     name = "poster.jpg" if kind == "poster" else "fanart.jpg"
     return str(PurePosixPath(rel) / name)
+
+
+# ---------------------------------------------------------------------------
+# Subtitle-status detection (for the items list display)
+# ---------------------------------------------------------------------------
+
+_SUBTITLE_EXTS = frozenset({".srt", ".ass", ".ssa", ".sub", ".vtt", ".idx", ".sup"})
+_RE_CJK = re.compile(r"[一-鿿]")
+
+
+def detect_subtitle_summary(names: Iterable[str]) -> str | None:
+    """Classify subtitle files under one item for display.
+
+    Returns ``"简体中文"`` / ``"繁体中文"`` / ``"中文"`` / ``"有字幕(非中文)"``,
+    or ``None`` when there is no subtitle file.
+    """
+    subs = [n for n in names if Path(n).suffix.lower() in _SUBTITLE_EXTS]
+    if not subs:
+        return None
+
+    _SIMPLIFIED = ("zh-hans", "zh_hans", "zh-cn", "zh_cn", "chs", "简体", "简中")
+    _TRADITIONAL = ("zh-hant", "zh_hant", "zh-tw", "zh_tw", "cht", "繁体", "繁中")
+
+    for n in subs:
+        low = n.lower()
+        if _RE_CJK.search(n):
+            if any(m in low for m in _SIMPLIFIED):
+                return "简体中文"
+            if any(m in low for m in _TRADITIONAL):
+                return "繁体中文"
+            return "中文"
+        if any(m in low for m in _SIMPLIFIED):
+            return "简体中文"
+        if any(m in low for m in _TRADITIONAL):
+            return "繁体中文"
+        if re.search(r"(?:^|[._\-])zh(?:[._\-]|$)", low) or "zho" in low or "chi" in low:
+            return "中文"
+    return "有字幕(非中文)"
+
+
+async def _detect_subtitle_summary_async(conn: Connection, rel: str) -> str | None:
+    """Detect the subtitle summary for the item at relative path *rel*."""
+    if _is_file_item(rel):
+        rel = str(PurePosixPath(rel).parent)
+    try:
+        names = await conn.list_dir(rel)
+    except OSError:
+        return None
+    return detect_subtitle_summary(names)
 
 
 def _library_connection(lib: Library, enc_key: bytes | None) -> Connection:

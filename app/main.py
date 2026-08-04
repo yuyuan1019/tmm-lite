@@ -38,7 +38,15 @@ from app.exceptions import (
     ScanBusyError,
     ScrapeError,
 )
-from app.scanner import ScanRunner, _ignored_paths, _set_ignored_paths, normalize_path
+from app.scanner import (
+    ScanRunner,
+    _detect_subtitle_summary_async,
+    _ignored_paths,
+    _library_connection,
+    _relative_folder,
+    _set_ignored_paths,
+    normalize_path,
+)
 from app.scheduler import ScrapeScheduler
 from app.scrapers.douban import DoubanScraper
 from app.scrapers.subtitle import SubtitleDownloader
@@ -443,11 +451,32 @@ def create_app(
 
             ignored_count = len(_ignored_paths(sess))
 
+            # Subtitle status per item — one connection per library to avoid
+            # repeated handshakes, then list each item's folder.
+            subtitle_map: dict[int, str | None] = {}
+            items_by_lib: dict[int, list[MediaItem]] = {}
+            for it in items:
+                items_by_lib.setdefault(it.library_id, []).append(it)
+            for lib_id, lib_items in items_by_lib.items():
+                lib = sess.get(Library, lib_id)
+                if lib is None:
+                    continue
+                conn = _library_connection(lib, request.app.state.enc_key)
+                try:
+                    for it in lib_items:
+                        rel = _relative_folder(it.folder_path, lib.path)
+                        subtitle_map[it.id] = await _detect_subtitle_summary_async(conn, rel)
+                except Exception:
+                    logger.warning("字幕检测失败(lib=%s)", lib.name, exc_info=True)
+                finally:
+                    await conn.aclose()
+
             return _render(
                 "items.html",
                 {
                     "request": request,
                     "items": items,
+                    "subtitle_map": subtitle_map,
                     "current_status": status,
                     "tab_counts": tab_counts,
                     "ignored_count": ignored_count,

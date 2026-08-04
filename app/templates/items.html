@@ -20,7 +20,7 @@
 
 <table>
 <thead>
-<tr><th>ID</th><th>识别标题</th><th>原始路径</th><th>年份</th><th>类型</th><th>匹配标题</th><th>评分</th><th>状态</th><th>失败原因</th><th>操作</th></tr>
+<tr><th>ID</th><th>识别标题</th><th>原始路径</th><th>年份</th><th>类型</th><th>匹配标题</th><th>评分</th><th>字幕</th><th>状态</th><th>失败原因</th><th>操作</th></tr>
 </thead>
 <tbody>
 {% for item in items %}
@@ -37,6 +37,11 @@
   <td>{{ item.media_type }}</td>
   <td>{{ item.matched_title or '' }}</td>
   <td>{{ item.rating or '' }}</td>
+  <td>{% set sub = subtitle_map.get(item.id, '') %}
+    {% if sub and '中文' in sub %}<span class="badge badge-matched" title="已检测到中文字幕">{{ sub }}</span>
+    {% elif sub %}<span class="badge badge-pending" title="有字幕但非中文">{{ sub }}</span>
+    {% else %}<span class="text-muted">—</span>{% endif %}
+  </td>
   <td><span class="badge badge-{{ item.status }}">{{ item.status }}</span></td>
   <td title="{{ item.error_message or '' }}">{{ (item.error_message or '')[:50] }}</td>
   <td>

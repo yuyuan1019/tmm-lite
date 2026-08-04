@@ -123,6 +123,32 @@ def test_api_search_empty_title(client: TestClient) -> None:
     assert resp.json()["items"] == []
 
 
+def test_items_page_shows_subtitle_status(tmp_path: Path) -> None:
+    from app.database import Library, MediaItem
+
+    media_root = tmp_path / "media"
+    film = media_root / "Film (2020)"
+    film.mkdir(parents=True)
+    (film / "movie.mkv").write_text("x")
+    (film / "movie.zh-Hans.srt").write_text("x")
+
+    data_dir = tmp_path / "data"
+    app = create_app(data_dir=data_dir, start_scheduler=False)
+    with TestClient(app) as c:
+        sf = c.app.state.session_factory
+        with sf.begin() as sess:
+            lib = Library(name="L", path=str(media_root), media_type="movie")
+            sess.add(lib)
+            sess.flush()
+            sess.add(MediaItem(
+                library_id=lib.id, media_type="movie", folder_path=str(film),
+                parsed_title="Film", status="matched",
+            ))
+
+        page = c.get("/items").text
+        assert "简体中文" in page
+
+
 # ---------------------------------------------------------------------------
 # M9-T4b: manual subtitle
 # ---------------------------------------------------------------------------
