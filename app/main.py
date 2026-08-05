@@ -527,11 +527,13 @@ def create_app(
 
         try:
             if background:
-                # Fire-and-forget: close modal immediately, result shown on reload
                 runner.start_rescrape_item_background(
                     item_id, query=query or None, tmdb_id=tmdb_id,
                 )
-                return JSONResponse({"ok": True})
+                return _redirect(
+                    "/items",
+                    ok="已开始后台重新刮削，稍后刷新查看结果",
+                )
             result = await runner.rescrape_item(
                 item_id, query=query or None, tmdb_id=tmdb_id,
             )
@@ -540,8 +542,6 @@ def create_app(
                 ok=f"已完成重新刮削: {result.status}",
             )
         except ScanBusyError:
-            if background:
-                return JSONResponse({"error": "任务正在运行中"}, status_code=409)
             return _redirect("/items", err="任务正在运行中")
         except ItemNotFoundError:
             return JSONResponse({"detail": "item not found"}, status_code=404)
