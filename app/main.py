@@ -499,7 +499,15 @@ def create_app(
         query = str(form.get("query", "")).strip()
         tmdb_id_str = str(form.get("tmdb_id", "")).strip()
         tmdb_id = int(tmdb_id_str) if tmdb_id_str.isdigit() else None
+        background = form.get("background") == "1"
+
         try:
+            if background:
+                # Fire-and-forget: close modal immediately, result shown on reload
+                runner.start_rescrape_item_background(
+                    item_id, query=query or None, tmdb_id=tmdb_id,
+                )
+                return JSONResponse({"ok": True})
             result = await runner.rescrape_item(
                 item_id, query=query or None, tmdb_id=tmdb_id,
             )
@@ -508,6 +516,8 @@ def create_app(
                 ok=f"已完成重新刮削: {result.status}",
             )
         except ScanBusyError:
+            if background:
+                return JSONResponse({"error": "任务正在运行中"}, status_code=409)
             return _redirect("/items", err="任务正在运行中")
         except ItemNotFoundError:
             return JSONResponse({"detail": "item not found"}, status_code=404)
@@ -1237,7 +1247,8 @@ def _format_time(dt: datetime | None) -> str:
 
 
 def _play_page_html(item_id: int, title: str) -> str:
-    """Return an HTML5 video player page for *item_id*."""
+    """Return an HTML5 video player page for *item_id* with MKV/MP4 fallback."""
+    stream_url = f"/api/stream/{item_id}"
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1246,25 +1257,99 @@ def _play_page_html(item_id: int, title: str) -> str:
 <title>{title} — 在线播放</title>
 <style>
 * {{ margin:0; padding:0; box-sizing:border-box; }}
-body {{ background:#000; color:#fff; font-family:-apple-system,sans-serif; display:flex; flex-direction:column; height:100vh; }}
-.header {{ padding:10px 16px; background:#1a1a1a; display:flex; align-items:center; gap:12px; }}
+body {{ background:#0a0a0a; color:#ccc; font-family:-apple-system,sans-serif; display:flex; flex-direction:column; height:100vh; }}
+.header {{ padding:10px 16px; background:#1a1a1a; display:flex; align-items:center; gap:12px; flex-shrink:0; }}
 .header a {{ color:#3498db; text-decoration:none; font-size:14px; }}
 .header h2 {{ font-size:16px; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
-.player-wrap {{ flex:1; display:flex; align-items:center; justify-content:center; }}
-video {{ max-width:100%; max-height:100%; }}
+.player-wrap {{ flex:1; display:flex; align-items:center; justify-content:center; position:relative; min-height:0; }}
+video {{ max-width:100%; max-height:100%; width:100%; height:100%; }}
+.loading {{ position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); text-align:center; }}
+.spinner {{ width:40px; height:40px; border:3px solid #333; border-top-color:#3498db; border-radius:50%; animation:spin 0.8s linear infinite; margin:0 auto 12px; }}
+@keyframes spin {{ to {{ transform:rotate(360deg); }} }}
+.fallback {{ display:none; padding:20px; text-align:center; }}
+.fallback code {{ display:block; margin:12px auto; padding:10px; background:#1a1a1a; border-radius:6px; word-break:break-all; max-width:500px; font-size:13px; }}
+.fallback button {{ margin:6px; padding:10px 20px; border:none; border-radius:6px; cursor:pointer; font-size:14px; }}
+.btn-copy {{ background:#2c3e50; color:#fff; }}
+.btn-pot {{ background:#e67e22; color:#fff; }}
 </style>
 </head>
 <body>
 <div class="header">
   <a href="/preview">← 返回影视库</a>
   <h2>{title}</h2>
+  <span id="status" style="font-size:12px;color:#888;"></span>
 </div>
 <div class="player-wrap">
-  <video controls autoplay style="width:100%;height:100%;">
-    <source src="/api/stream/{item_id}" type="video/mp4">
-    您的浏览器不支持 HTML5 视频播放。
+  <div class="loading" id="loading"><div class="spinner"></div><div>正在加载视频…</div></div>
+  <video id="player" controls style="display:none;"
+         onloadedmetadata="onLoaded()"
+         onerror="onError()"
+         onwaiting="document.getElementById('loading').style.display='block'"
+         onplaying="document.getElementById('loading').style.display='none'">
+    <source src="{stream_url}">
   </video>
+  <div class="fallback" id="fallback">
+    <h3 style="color:#e74c3c;margin-bottom:12px;">⚠ 浏览器无法播放此视频</h3>
+    <p style="margin-bottom:8px;">可能原因：视频格式（如 MKV）不被浏览器支持，或编码格式不兼容。</p>
+    <p style="margin-bottom:16px;">请使用以下方式播放：</p>
+    <code id="streamUrl">{stream_url}</code>
+    <button class="btn-copy" onclick="copyStreamUrl()">📋 复制流地址</button>
+    <button class="btn-pot" onclick="potPlayer()">🎬 在 PotPlayer 中打开</button>
+    <p style="margin-top:16px;font-size:12px;color:#888;">
+      PotPlayer: Ctrl+U → 粘贴地址<br>
+      VLC: 媒体 → 打开网络串流 → 粘贴地址<br>
+      或者直接复制完整地址: <b>http://<您的IP>:8000{stream_url}</b>
+    </p>
+  </div>
 </div>
+<script>
+var streamUrl = '{stream_url}';
+var fullUrl = window.location.origin + streamUrl;
+document.getElementById('streamUrl').textContent = fullUrl;
+
+function onLoaded() {{
+  document.getElementById('loading').style.display = 'none';
+  document.getElementById('player').style.display = 'block';
+  document.getElementById('status').textContent = '正在播放';
+}}
+
+function onError() {{
+  var v = document.getElementById('player');
+  var err = v.error;
+  document.getElementById('loading').style.display = 'none';
+  document.getElementById('player').style.display = 'none';
+  document.getElementById('fallback').style.display = 'block';
+  document.getElementById('status').textContent = err ? '错误: ' + (err.message || '未知') : '播放失败';
+}}
+
+function copyStreamUrl() {{
+  if (navigator.clipboard) {{
+    navigator.clipboard.writeText(fullUrl).then(function() {{
+      alert('流地址已复制！\\n\\n在 PotPlayer 中 Ctrl+U 粘贴。');
+    }});
+  }} else {{
+    prompt('请复制以下地址：', fullUrl);
+  }}
+}}
+
+function potPlayer() {{
+  if (navigator.clipboard) {{
+    navigator.clipboard.writeText(fullUrl).then(function() {{
+      alert('流地址已复制！\\n\\n请打开 PotPlayer，按 Ctrl+U 粘贴，点击确定即可播放。');
+    }});
+  }}
+}}
+
+// Auto-hide loading after 10s if video hasn't loaded
+setTimeout(function() {{
+  var v = document.getElementById('player');
+  if (v.readyState < 2) {{
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('fallback').style.display = 'block';
+    document.getElementById('status').textContent = '加载超时 — 视频格式可能不兼容';
+  }}
+}}, 10000);
+</script>
 </body>
 </html>"""
 

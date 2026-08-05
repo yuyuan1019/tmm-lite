@@ -156,11 +156,29 @@ function _rescrapeForm(extra) {
   document.body.appendChild(f);
   f.submit();
 }
-function chooseRescrape(tmdbId) { _rescrapeForm({ tmdb_id: tmdbId }); }
+
+function _rescrapeAsync(extra) {
+  // Fire-and-forget: close modal immediately, reload page after a short
+  // delay so the background task has time to finish.
+  closeRescrape();
+  var fd = new FormData();
+  fd.append('background', '1');
+  for (var k in extra) { fd.append(k, extra[k]); }
+  fetch('/items/' + rescrapeItemId + '/rescrape', { method: 'POST', body: fd })
+    .then(function() {
+      // Reload after giving the background task a head start
+      setTimeout(function() { window.location.reload(); }, 1500);
+    })
+    .catch(function() {
+      setTimeout(function() { window.location.reload(); }, 1500);
+    });
+}
+
+function chooseRescrape(tmdbId) { _rescrapeAsync({ tmdb_id: tmdbId }); }
 function submitQueryRescrape() {
   var t = document.getElementById('rescrape_title').value.trim();
   if (!t) { alert('请输入标题'); return; }
-  _rescrapeForm({ query: t });
+  _rescrapeAsync({ query: t });
 }
 </script>
 {% endblock %}

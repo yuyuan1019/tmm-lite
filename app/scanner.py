@@ -616,6 +616,14 @@ class ScanRunner:
         finally:
             self._release()
 
+    def start_rescrape_item_background(
+        self, item_id: int, *, query: str | None = None, tmdb_id: int | None = None,
+    ) -> asyncio.Task[MediaItem]:
+        """Like :meth:`rescrape_item` but returns immediately; runs in background."""
+        return self._start_background(
+            self._rescrape_item_impl(item_id, query=query, tmdb_id=tmdb_id)
+        )
+
     async def download_subtitle(self, item_id: int) -> Path | None:
         """Manually download subtitles for a single item.
 
