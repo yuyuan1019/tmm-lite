@@ -351,7 +351,7 @@ async def _discover_walk(
             # Loose videos in the library root are individual file items.
             for v in videos:
                 found.add(normalize_path(str(PurePosixPath(lib.path) / v)))
-        elif _RE_COLLECTION_DIR.search(name):
+        elif _RE_COLLECTION_DIR.search(Path(rel).name):
             # Collection / box-set container folder — recurse into its
             # children but do NOT treat the folder itself as a movie.
             for d in subdirs:
@@ -372,7 +372,7 @@ async def _discover_walk(
         for d in subdirs:
             await _discover_walk(conn, lib, _join_rel(rel, d), found, is_root=False)
     else:  # tv
-        if not is_root and _RE_COLLECTION_DIR.search(name):
+        if not is_root and _RE_COLLECTION_DIR.search(Path(rel).name):
             # Collection / box-set container — recurse, don't add as a show.
             for d in subdirs:
                 await _discover_walk(conn, lib, _join_rel(rel, d), found, is_root=False)
