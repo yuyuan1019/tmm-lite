@@ -1279,15 +1279,16 @@ body {{ background:#0a0a0a; color:#ccc; font-family:-apple-system,sans-serif; di
 .header a {{ color:#3498db; text-decoration:none; font-size:14px; }}
 .header h2 {{ font-size:16px; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
 .player-wrap {{ flex:1; display:flex; align-items:center; justify-content:center; position:relative; min-height:0; }}
-video {{ max-width:100%; max-height:100%; width:100%; height:100%; }}
-.loading {{ position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); text-align:center; }}
+video {{ max-width:100%; max-height:100%; width:100%; height:100%; background:#000; }}
+.loading {{ display:none; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); text-align:center; z-index:10; }}
 .spinner {{ width:40px; height:40px; border:3px solid #333; border-top-color:#3498db; border-radius:50%; animation:spin 0.8s linear infinite; margin:0 auto 12px; }}
 @keyframes spin {{ to {{ transform:rotate(360deg); }} }}
-.fallback {{ display:none; padding:20px; text-align:center; }}
-.fallback code {{ display:block; margin:12px auto; padding:10px; background:#1a1a1a; border-radius:6px; word-break:break-all; max-width:500px; font-size:13px; }}
+.fallback {{ display:none; padding:20px; text-align:center; max-width:500px; margin:0 auto; }}
+.fallback code {{ display:block; margin:12px auto; padding:10px; background:#1a1a1a; border-radius:6px; word-break:break-all; font-size:13px; }}
 .fallback button {{ margin:6px; padding:10px 20px; border:none; border-radius:6px; cursor:pointer; font-size:14px; }}
 .btn-copy {{ background:#2c3e50; color:#fff; }}
 .btn-pot {{ background:#e67e22; color:#fff; }}
+.btn-back {{ background:#555; color:#fff; }}
 </style>
 </head>
 <body>
@@ -1296,47 +1297,104 @@ video {{ max-width:100%; max-height:100%; width:100%; height:100%; }}
   <h2>{title}</h2>
   <span id="status" style="font-size:12px;color:#888;"></span>
 </div>
-<div class="player-wrap">
-  <div class="loading" id="loading"><div class="spinner"></div><div>正在加载视频…</div></div>
+<div class="player-wrap" id="playerWrap">
+  <div id="loading" class="loading" style="display:flex;flex-direction:column;align-items:center;">
+    <div class="spinner"></div><div>正在检测视频流…</div>
+  </div>
   <video id="player" controls style="display:none;"
          onloadedmetadata="onLoaded()"
          onerror="onError()"
-         onwaiting="document.getElementById('loading').style.display='block'"
-         onplaying="document.getElementById('loading').style.display='none'">
-    <source src="{stream_url}">
+         onwaiting="showLoading()"
+         onplaying="hideLoading()"
+         onabort="onError()"
+         onstalled="onError()">
+    <source src="{stream_url}" onerror="onSourceError()">
   </video>
-  <div class="fallback" id="fallback">
-    <h3 style="color:#e74c3c;margin-bottom:12px;">⚠ 浏览器无法播放此视频</h3>
-    <p style="margin-bottom:8px;">可能原因：视频格式（如 MKV）不被浏览器支持，或编码格式不兼容。</p>
-    <p style="margin-bottom:16px;">请使用以下方式播放：</p>
+  <div id="fallback" class="fallback">
+    <h3 style="color:#e74c3c;margin-bottom:12px;">⚠ 无法播放此视频</h3>
+    <p style="margin-bottom:4px;color:#f99;" id="fallbackReason"></p>
+    <p style="margin-bottom:12px;">可能原因：视频格式不被浏览器支持、编码不兼容、或文件未找到。</p>
+    <p style="margin-bottom:16px;">请使用外部播放器打开：</p>
     <code id="streamUrl">{stream_url}</code>
     <button class="btn-copy" onclick="copyStreamUrl()">📋 复制流地址</button>
     <button class="btn-pot" onclick="potPlayer()">🎬 在 PotPlayer 中打开</button>
+    <a href="/preview"><button class="btn-back">← 返回影视库</button></a>
     <p style="margin-top:16px;font-size:12px;color:#888;">
       PotPlayer: Ctrl+U → 粘贴地址<br>
-      VLC: 媒体 → 打开网络串流 → 粘贴地址<br>
-      或者直接复制完整地址: <b>http://<您的IP>:8000{stream_url}</b>
+      VLC: 媒体 → 打开网络串流 → 粘贴地址
     </p>
   </div>
 </div>
 <script>
 var streamUrl = '{stream_url}';
 var fullUrl = window.location.origin + streamUrl;
+var _probeDone = false;
+var _loadTimer = null;
+
 document.getElementById('streamUrl').textContent = fullUrl;
 
-function onLoaded() {{
+// Probe: request just the first byte via Range to verify the stream works.
+// If it returns 206, the stream is valid.  If 404/error, show fallback.
+fetch(fullUrl, {{ headers: {{ 'Range': 'bytes=0-0' }} }}).then(function(r) {{
+  if (r.status === 206) {{
+    startPlayer(); return;
+  }}
+  if (r.status >= 400) {{
+    r.json().then(function(j) {{ showFallback(j.error || 'HTTP ' + r.status); }})
+     .catch(function() {{ showFallback('服务器返回 HTTP ' + r.status); }});
+    return;
+  }}
+  // Unexpected success without range — try anyway
+  startPlayer();
+}}).catch(function(e) {{
+  showFallback('无法连接视频流: ' + e.message);
+}});
+
+function startPlayer() {{
+  if (_probeDone) return;
+  _probeDone = true;
+  document.getElementById('loading').style.display = 'flex';
+  document.querySelector('#loading div:last-child').textContent = '正在加载视频…';
+  var v = document.getElementById('player');
+  v.style.display = 'block';
+  v.load();
+  // Safety timeout: if video doesn't start within 15s, show fallback
+  _loadTimer = setTimeout(function() {{
+    if (v.readyState < 2) {{
+      showFallback('加载超时 — 视频可能过大或编码不兼容');
+    }}
+  }}, 15000);
+}}
+
+function showFallback(reason) {{
+  if (_loadTimer) clearTimeout(_loadTimer);
   document.getElementById('loading').style.display = 'none';
+  var v = document.getElementById('player');
+  v.style.display = 'none';
+  v.pause(); v.removeAttribute('src');
+  document.getElementById('fallback').style.display = 'block';
+  document.getElementById('fallbackReason').textContent = reason || '';
+  document.getElementById('status').textContent = '播放失败';
+}}
+
+function showLoading() {{ document.getElementById('loading').style.display = 'flex'; }}
+function hideLoading() {{ document.getElementById('loading').style.display = 'none'; }}
+
+function onLoaded() {{
+  hideLoading();
   document.getElementById('player').style.display = 'block';
   document.getElementById('status').textContent = '正在播放';
+  if (_loadTimer) clearTimeout(_loadTimer);
 }}
 
 function onError() {{
   var v = document.getElementById('player');
-  var err = v.error;
-  document.getElementById('loading').style.display = 'none';
-  document.getElementById('player').style.display = 'none';
-  document.getElementById('fallback').style.display = 'block';
-  document.getElementById('status').textContent = err ? '错误: ' + (err.message || '未知') : '播放失败';
+  var msg = v.error ? v.error.message : '未知错误';
+  showFallback('视频解码失败: ' + msg);
+}}
+
+function onSourceError() {{
+  showFallback('视频源加载失败 — 格式不支持或文件不存在');
 }}
 
 function copyStreamUrl() {{
@@ -1356,16 +1414,6 @@ function potPlayer() {{
     }});
   }}
 }}
-
-// Auto-hide loading after 10s if video hasn't loaded
-setTimeout(function() {{
-  var v = document.getElementById('player');
-  if (v.readyState < 2) {{
-    document.getElementById('loading').style.display = 'none';
-    document.getElementById('fallback').style.display = 'block';
-    document.getElementById('status').textContent = '加载超时 — 视频格式可能不兼容';
-  }}
-}}, 10000);
 </script>
 </body>
 </html>"""
