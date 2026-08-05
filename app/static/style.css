@@ -32,6 +32,16 @@ h2 { margin: 20px 0 12px; }
 table { width: 100%; border-collapse: collapse; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
 th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid #eee; font-size: 13px; }
 th { background: #f8f9fa; font-weight: 600; white-space: nowrap; }
+.col-id { width: 40px; }
+.col-year { width: 50px; }
+.col-type { width: 50px; }
+.col-rating { width: 55px; }
+.col-status { width: 85px; }
+.col-subtitle { width: 110px; white-space: nowrap; }
+.col-title { min-width: 120px; }
+.col-matched-title { min-width: 130px; }
+.col-error { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.col-actions { width: 180px; }
 
 .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; }
 .badge-pending { background: #e2e3e5; color: #383d41; }

@@ -27,31 +27,50 @@
 
 <table>
 <thead>
-<tr><th>ID</th><th>识别标题</th><th>原始路径</th><th>年份</th><th>类型</th><th>匹配标题</th><th>评分</th><th>字幕</th><th>状态</th><th>失败原因</th><th>操作</th></tr>
+<tr>
+  <th class="col-id">ID</th>
+  <th class="col-title">识别标题</th>
+  <th class="col-matched-title">匹配标题</th>
+  <th>原始路径</th>
+  <th class="col-year">年份</th>
+  <th class="col-type">类型</th>
+  <th class="col-rating">评分</th>
+  <th class="col-subtitle">字幕</th>
+  <th class="col-status">状态</th>
+  <th class="col-error">失败原因</th>
+  <th class="col-actions">操作</th>
+</tr>
 </thead>
 <tbody>
 {% for item in items %}
 <tr>
-  <td>{{ item.id }}</td>
-  <td>{% if item.status == 'manual_needed' %}<span class="text-warn">{{ item.folder_path }}</span>{% else %}{{ item.parsed_title or '' }}{% endif %}</td>
+  <td class="col-id">{{ item.id }}</td>
+  <td class="col-title">{% if item.status == 'manual_needed' %}<span class="text-warn">{{ item.folder_path }}</span>{% else %}{{ item.parsed_title or '' }}{% endif %}</td>
+  <td class="col-matched-title">
+    {% if item.matched_title %}
+      <span>{{ item.matched_title }}</span>
+      {% if item.matched_original_title and item.matched_original_title != item.matched_title %}
+      <br><small class="text-muted">{{ item.matched_original_title }}</small>
+      {% endif %}
+    {% else %}<span class="text-muted">—</span>{% endif %}
+  </td>
   <td>
     <details class="path-cell">
       <summary title="{{ item.folder_path }}">{{ item.folder_path[:50] }}{% if item.folder_path|length > 50 %}…{% endif %}</summary>
       <div class="path-full">{{ item.folder_path }}</div>
     </details>
   </td>
-  <td>{{ item.parsed_year or '' }}</td>
-  <td>{{ item.media_type }}</td>
-  <td>{{ item.matched_title or '' }}</td>
-  <td>{{ item.rating or '' }}</td>
-  <td>{% set sub = subtitle_map.get(item.id, '') %}
+  <td class="col-year">{{ item.parsed_year or '' }}</td>
+  <td class="col-type">{{ item.media_type }}</td>
+  <td class="col-rating">{{ item.rating or '' }}</td>
+  <td class="col-subtitle">{% set sub = subtitle_map.get(item.id, '') %}
     {% if sub and '中文' in sub %}<span class="badge badge-matched" title="已检测到中文字幕">{{ sub }}</span>
     {% elif sub %}<span class="badge badge-pending" title="有字幕但非中文">{{ sub }}</span>
     {% else %}<span class="text-muted">—</span>{% endif %}
   </td>
-  <td><span class="badge badge-{{ item.status }}">{{ item.status }}</span></td>
-  <td title="{{ item.error_message or '' }}">{{ (item.error_message or '')[:50] }}</td>
-  <td>
+  <td class="col-status"><span class="badge badge-{{ item.status }}">{{ item.status }}</span></td>
+  <td class="col-error" title="{{ item.error_message or '' }}">{{ (item.error_message or '')[:50] }}</td>
+  <td class="col-actions">
     <div class="action-cell">
       <button type="button" {% if is_running %}disabled{% endif %}
               onclick="openRescrape(this, {{ item.id }}, '{{ item.media_type }}')"
