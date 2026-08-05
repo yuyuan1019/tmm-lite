@@ -41,7 +41,7 @@ _NOISE_WORDS: set[str] = {
     "10bit", "8bit", "sdr",
     # Source
     "bluray", "blu-ray", "bdrip", "brrip", "web-dl", "webdl", "webrip", "hdtv",
-    "dvdrip", "remux", "hdrip", "cam",
+    "dvdrip", "remux", "hdrip", "cam", "complete",
     # Codec / audio
     "x264", "x265", "h264", "h.264", "h265", "h.265", "hevc", "avc", "av1",
     "aac", "ac3", "dts", "dts-hd", "dts-x", "truehd", "atmos", "ddp5.1", "dd5.1", "flac", "2audio",

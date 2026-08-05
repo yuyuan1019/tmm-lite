@@ -82,8 +82,10 @@ _NOISE_DIR_NAMES: frozenset[str] = frozenset({
 })
 
 # A directory is a TV show when it directly holds a Season-like sub-folder
-# (English "Season 01", compact "S01", or Chinese "第1季").
-_RE_SEASON_DIR = re.compile(r"(?i)^(?:season[ ._]?\d{1,2}|s\d{1,2}|第\d{1,2}季)$")
+# (English "Season 01", compact "S01", or Chinese "第1季").  Extra text after
+# the season marker is allowed (e.g. "第5季（2019）", "Season 01 (2020)").
+# No leading anchor — .match() gives start-anchoring; .search() finds mid-name.
+_RE_SEASON_DIR = re.compile(r"(?i)(?:season[ ._]?\d{1,2}|s\d{1,2}|第\d{1,2}季)")
 
 # Collection / box-set container folders — these hold multiple movies and
 # should never be scraped as a single title.
@@ -415,23 +417,42 @@ async def _looks_like_deep_movie(conn: Connection, rel: str, subdirs: list[str])
 
 
 def _is_episode_only_name(name: str) -> bool:
-    """True when *name* is an episode label with no show title (第3集, S01E02)."""
+    """True when *name* is an episode or season label with no show title.
+
+    Examples: ``第3集``, ``S01E02``, ``第5季（2019）``, ``Season 01``.
+    """
     parsed = parse_folder_name(name)
-    return parsed.title is None and parsed.episode is not None
+    if parsed.title is not None:
+        return False
+    return parsed.episode is not None or parsed.season is not None
 
 
 def _looks_like_episode_container(rel: str, subdirs: list[str]) -> bool:
-    """True when *rel* is a show whose episodes live one-per-folder.
+    """True when *rel* is a show whose episodes/seasons live one-per-folder.
 
     Matches e.g. ``黑镜 Black Mirror[全7季]/第3集（2016）/`` — the show folder's
-    own name parses to a title and its immediate sub-folders are episode labels.
+    own name parses to a title and its immediate sub-folders are episode/season
+    labels.
     """
     if not subdirs:
         return False
     parsed = parse_folder_name(Path(rel).name)
     if not parsed.title:
         return False
-    return any(_is_episode_only_name(s) for s in subdirs)
+    for s in subdirs:
+        # Check 1: episode/season-only name ("第3集", "S01E02", "第5季（2019）")
+        if _is_episode_only_name(s):
+            return True
+        # Check 2: name contains a season pattern anywhere
+        # (e.g. "无耻家庭.第04季.Shameless.S04.2014..." — has S04 mid-name)
+        if _RE_SEASON_DIR.search(s):
+            return True
+        # Check 3: parsed season/episode number is present
+        # (even if the folder name also has a title)
+        sp = parse_folder_name(s)
+        if sp.season is not None or sp.episode is not None:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
