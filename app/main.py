@@ -551,6 +551,48 @@ def create_app(
             return _redirect("/items", err=str(exc))
 
     # ------------------------------------------------------------------
+    # POST /items/refresh-subtitles
+    # ------------------------------------------------------------------
+
+    @app.post("/items/refresh-subtitles")
+    async def items_refresh_subtitles(request: Request) -> Any:
+        """Batch download subtitles for all matched items with non-Chinese titles."""
+        runner: ScanRunner = request.app.state.runner
+        config: AppConfig = request.app.state.config
+
+        if not config.subtitle_enabled:
+            return _redirect("/items", err="字幕功能未启用，请在设置中开启")
+
+        sess = request.app.state.session_factory()
+        try:
+            import re
+            _RE_CJK = re.compile(r"[一-鿿]")
+            rows = sess.execute(
+                select(MediaItem).where(
+                    MediaItem.status == "matched",
+                    MediaItem.matched_title.isnot(None),
+                )
+            ).scalars().all()
+
+            eligible_count = 0
+            for item in rows:
+                check_title = item.matched_original_title or item.matched_title or ""
+                if check_title and not _RE_CJK.search(check_title):
+                    eligible_count += 1
+        finally:
+            sess.close()
+
+        if eligible_count == 0:
+            return _redirect("/items", err="没有可刷新字幕的条目（全部已经是中文标题）")
+
+        try:
+            runner.start_refresh_subtitles_background()
+        except ScanBusyError:
+            return _redirect("/items", err="任务正在运行中，请稍后")
+
+        return _redirect("/items", ok=f"已开始刷新字幕，共 {eligible_count} 条非中文标题条目")
+
+    # ------------------------------------------------------------------
     # POST /items/{id}/delete
     # ------------------------------------------------------------------
 
@@ -820,6 +862,177 @@ def create_app(
         return _redirect("/settings", ok="设置已保存")
 
     # ------------------------------------------------------------------
+    # GET /preview — poster grid browse page
+    # ------------------------------------------------------------------
+
+    @app.get("/preview")
+    async def preview(request: Request, genre: str = "", media_type: str = "") -> Any:
+        """Browse matched items as a poster grid, optionally filtered by genre and media type."""
+        sess = request.app.state.session_factory()
+        try:
+            stmt = select(MediaItem).where(MediaItem.status == "matched")
+            if media_type in ("movie", "tv"):
+                stmt = stmt.where(MediaItem.media_type == media_type)
+            stmt = stmt.order_by(MediaItem.id.desc())
+
+            items = sess.execute(stmt).scalars().all()
+
+            # Collect all genres for the filter bar
+            all_genres: set[str] = set()
+            filtered_items: list[MediaItem] = []
+            for item in items:
+                item_genres = [g.strip() for g in (item.genres or "").split(",") if g.strip()]
+                all_genres.update(item_genres)
+                if genre and genre not in item_genres:
+                    continue
+                filtered_items.append(item)
+
+            # Group by genre
+            genre_groups: dict[str, list[MediaItem]] = {}
+            for item in filtered_items:
+                item_genres = [g.strip() for g in (item.genres or "").split(",") if g.strip()]
+                for g in item_genres:
+                    if genre and g != genre:
+                        continue
+                    genre_groups.setdefault(g, []).append(item)
+
+            # If a specific genre is selected, only show that group
+            if genre:
+                genre_groups = {genre: genre_groups.get(genre, [])}
+
+            sorted_genres = sorted(all_genres)
+
+            return _render(
+                "preview.html",
+                {
+                    "request": request,
+                    "genre_groups": genre_groups,
+                    "all_genres": sorted_genres,
+                    "current_genre": genre,
+                    "current_media_type": media_type,
+                    "total_items": len(filtered_items),
+                },
+            )
+        finally:
+            sess.close()
+
+    # ------------------------------------------------------------------
+    # GET /play/{item_id} — HTML5 video player page
+    # ------------------------------------------------------------------
+
+    @app.get("/play/{item_id}")
+    async def play_page(request: Request, item_id: int) -> Any:
+        """Render an HTML5 video player for a media item."""
+        sess = request.app.state.session_factory()
+        try:
+            item = sess.get(MediaItem, item_id)
+            if item is None:
+                return HTMLResponse("<h2>条目不存在</h2>", status_code=404)
+            if item.status != "matched":
+                return HTMLResponse("<h2>该条目尚未刮削完成</h2>", status_code=400)
+
+            title = item.matched_title or item.parsed_title or "Unknown"
+            return HTMLResponse(_play_page_html(item_id, title))
+        finally:
+            sess.close()
+
+    # ------------------------------------------------------------------
+    # GET /api/stream/{item_id} — video streaming with Range support
+    # ------------------------------------------------------------------
+
+    @app.get("/api/stream/{item_id}")
+    async def stream_video(request: Request, item_id: int) -> Any:
+        """Stream a video file with HTTP Range support (for HTML5 <video>)."""
+        from starlette.responses import StreamingResponse
+
+        sess = request.app.state.session_factory()
+        try:
+            item = sess.get(MediaItem, item_id)
+            if item is None:
+                return JSONResponse({"error": "item not found"}, status_code=404)
+
+            lib = sess.get(Library, item.library_id)
+            if lib is None:
+                return JSONResponse({"error": "library not found"}, status_code=404)
+
+            conn = _library_connection(lib, request.app.state.enc_key)
+        finally:
+            sess.close()
+
+        try:
+            # Find the video file
+            from app.scanner import _find_video_file_async, _relative_folder
+            rel = _relative_folder(item.folder_path, lib.path)
+            video_rel = await _find_video_file_async(conn, rel)
+            if video_rel is None:
+                await conn.aclose()
+                return JSONResponse({"error": "no video file found"}, status_code=404)
+
+            # Determine file size and MIME type
+            file_size = await conn.file_size(video_rel)
+            ext = Path(video_rel).suffix.lower()
+            content_type = _video_mime(ext)
+
+            # Parse Range header
+            range_header = request.headers.get("range")
+            if range_header:
+                # Support "bytes=start-end" format
+                import re
+                m = re.match(r"bytes=(\d+)-(\d*)", range_header)
+                if m:
+                    start = int(m.group(1))
+                    end_str = m.group(2)
+                    if end_str:
+                        end = min(int(end_str), file_size - 1)
+                    else:
+                        end = file_size - 1
+                    chunk_size = end - start + 1
+
+                    data = await conn.read_range(video_rel, start, chunk_size)
+                    await conn.aclose()
+
+                    headers: dict[str, str] = {
+                        "Content-Range": f"bytes {start}-{end}/{file_size}",
+                        "Accept-Ranges": "bytes",
+                        "Content-Length": str(len(data)),
+                        "Content-Type": content_type,
+                    }
+                    return StreamingResponse(
+                        _single_chunk(data),
+                        status_code=206,
+                        headers=headers,
+                    )
+
+            # No range — stream full file in chunks
+            CHUNK = 1024 * 1024  # 1 MiB
+            async def _stream_full() -> Any:
+                try:
+                    pos = 0
+                    while pos < file_size:
+                        size = min(CHUNK, file_size - pos)
+                        chunk = await conn.read_range(video_rel, pos, size)
+                        if not chunk:
+                            break
+                        yield chunk
+                        pos += len(chunk)
+                finally:
+                    await conn.aclose()
+
+            return StreamingResponse(
+                _stream_full(),
+                status_code=200,
+                headers={
+                    "Content-Length": str(file_size),
+                    "Content-Type": content_type,
+                    "Accept-Ranges": "bytes",
+                },
+                media_type=content_type,
+            )
+        except Exception:
+            await conn.aclose()
+            raise
+
+    # ------------------------------------------------------------------
     # GET /healthz
     # ------------------------------------------------------------------
 
@@ -1021,6 +1234,57 @@ def _format_time(dt: datetime | None) -> str:
     if dt is None:
         return "未启用"
     return _filter_localtime(dt)
+
+
+def _play_page_html(item_id: int, title: str) -> str:
+    """Return an HTML5 video player page for *item_id*."""
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{title} — 在线播放</title>
+<style>
+* {{ margin:0; padding:0; box-sizing:border-box; }}
+body {{ background:#000; color:#fff; font-family:-apple-system,sans-serif; display:flex; flex-direction:column; height:100vh; }}
+.header {{ padding:10px 16px; background:#1a1a1a; display:flex; align-items:center; gap:12px; }}
+.header a {{ color:#3498db; text-decoration:none; font-size:14px; }}
+.header h2 {{ font-size:16px; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+.player-wrap {{ flex:1; display:flex; align-items:center; justify-content:center; }}
+video {{ max-width:100%; max-height:100%; }}
+</style>
+</head>
+<body>
+<div class="header">
+  <a href="/preview">← 返回影视库</a>
+  <h2>{title}</h2>
+</div>
+<div class="player-wrap">
+  <video controls autoplay style="width:100%;height:100%;">
+    <source src="/api/stream/{item_id}" type="video/mp4">
+    您的浏览器不支持 HTML5 视频播放。
+  </video>
+</div>
+</body>
+</html>"""
+
+
+def _video_mime(ext: str) -> str:
+    """Return the MIME type for a video file extension."""
+    return {
+        ".mp4": "video/mp4",
+        ".mkv": "video/x-matroska",
+        ".webm": "video/webm",
+        ".avi": "video/x-msvideo",
+        ".mov": "video/quicktime",
+        ".ts": "video/mp2t",
+        ".m2ts": "video/mp2t",
+    }.get(ext, "application/octet-stream")
+
+
+async def _single_chunk(data: bytes) -> Any:
+    """Async generator that yields a single chunk (for range responses)."""
+    yield data
 
 
 def _read_proc_mounts() -> dict[str, str]:

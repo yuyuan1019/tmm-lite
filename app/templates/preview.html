@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>影视库</h1>
+
+<div class="preview-toolbar">
+  <div class="tabs">
+    <a href="/preview{% if current_genre %}?genre={{ current_genre }}{% endif %}"
+       class="tab {% if not current_media_type %}active{% endif %}">全部</a>
+    <a href="/preview?media_type=movie{% if current_genre %}&genre={{ current_genre }}{% endif %}"
+       class="tab {% if current_media_type=='movie' %}active{% endif %}">电影</a>
+    <a href="/preview?media_type=tv{% if current_genre %}&genre={{ current_genre }}{% endif %}"
+       class="tab {% if current_media_type=='tv' %}active{% endif %}">电视剧</a>
+  </div>
+
+  <div class="tabs" style="margin-top:8px;">
+    <a href="/preview{% if current_media_type %}?media_type={{ current_media_type }}{% endif %}"
+       class="tab {% if not current_genre %}active{% endif %}">全部类型</a>
+    {% for g in all_genres %}
+    <a href="/preview?genre={{ g }}{% if current_media_type %}&media_type={{ current_media_type }}{% endif %}"
+       class="tab {% if current_genre==g %}active{% endif %}">{{ g }}</a>
+    {% endfor %}
+  </div>
+
+  <div class="status-text" style="margin-top:8px;">共 {{ total_items }} 部</div>
+</div>
+
+{% for genre, items in genre_groups.items() %}
+{% if items %}
+<div class="genre-section">
+  <h2>{{ genre }}</h2>
+  <div class="poster-grid">
+    {% for item in items %}
+    <div class="poster-card"
+         onclick="openDetail({{ item.id }}, '{{ (item.matched_title or item.parsed_title or '') | e }}', '{{ (item.matched_original_title or '') | e }}', {{ item.matched_year or 0 }}, '{{ (item.overview or '') | e }}', {{ item.rating or 0 }}, '{{ item.folder_path | e }}', '{{ item.media_type }}')"
+         title="点击查看详情及播放路径">
+      {% if item.poster_url %}
+      <div class="poster-img-wrap">
+        <img src="{{ item.poster_url }}"
+             alt="{{ item.matched_title or item.parsed_title or '' }}"
+             class="poster-img"
+             loading="lazy"
+             referrerpolicy="no-referrer"
+             onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
+        <div class="poster-placeholder" style="display:none;">
+          <span>{{ (item.matched_title or item.parsed_title or '?')[:4] }}</span>
+        </div>
+      </div>
+      {% else %}
+      <div class="poster-placeholder large">
+        <span>{{ (item.matched_title or item.parsed_title or '?')[:8] }}</span>
+      </div>
+      {% endif %}
+      <div class="poster-info">
+        <div class="poster-title" title="{{ item.matched_title or item.parsed_title or '' }}">
+          {{ item.matched_title or item.parsed_title or '' }}
+        </div>
+        <div class="poster-meta">
+          {% if item.matched_year %}<span>{{ item.matched_year }}</span>{% endif %}
+          {% if item.rating %}<span class="poster-rating">⭐ {{ item.rating }}</span>{% endif %}
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+{% endfor %}
+
+{% if not genre_groups %}
+<div class="notice" style="text-align:center;padding:40px;">
+  <p>暂无已匹配的媒体项。请先运行扫描并等待刮削完成。</p>
+  <a href="/items" style="color:#2c3e50;">查看刮削结果 →</a>
+</div>
+{% endif %}
+
+<!-- 详情弹窗 -->
+<div id="detail_modal" style="display:none; position:fixed; top:5%; left:10%; width:80%; max-width:560px; background:white; border:2px solid #2c3e50; border-radius:8px; z-index:1000; overflow:auto; padding:20px; max-height:90%;">
+  <div style="display:flex; justify-content:space-between; margin-bottom:12px;">
+    <h3 style="margin:0" id="detail_title"></h3>
+    <button type="button" onclick="closeDetail()">✕</button>
+  </div>
+  <p style="color:#888;font-size:13px;"><span id="detail_original"></span></p>
+  <p style="color:#888;font-size:13px;"><span id="detail_year"></span> · <span id="detail_type"></span> · ⭐ <span id="detail_rating"></span></p>
+  <p style="font-size:14px;line-height:1.6;margin:12px 0;" id="detail_overview"></p>
+  <fieldset style="margin-bottom:12px;">
+    <legend>媒体路径</legend>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <code id="detail_path" style="flex:1;padding:6px 8px;background:#f8f9fa;border-radius:4px;font-size:12px;word-break:break-all;"></code>
+      <button type="button" onclick="copyPath()" style="font-size:12px;white-space:nowrap;">📋 复制</button>
+    </div>
+  </fieldset>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;">
+    <button type="button" onclick="playOnline()" style="background:#27ae60;flex:1;min-width:140px;">
+      ▶ 在线播放
+    </button>
+    <button type="button" onclick="playPotPlayer()" style="background:#e67e22;flex:1;min-width:140px;">
+      🎬 PotPlayer 播放
+    </button>
+  </div>
+  <p style="font-size:12px;color:#999;margin-top:8px;">
+    在线播放：浏览器直接播放（支持 MP4/MKV/WebM）。<br>
+    PotPlayer：复制流地址后在 PotPlayer 中 Ctrl+U 粘贴打开，或右键 → 打开 → 打开链接。
+  </p>
+</div>
+
+<script>
+var _detailItemId = 0;
+var _detailPath = '';
+
+function openDetail(id, title, original, year, overview, rating, path, mediaType) {
+  _detailItemId = id;
+  document.getElementById('detail_title').textContent = title;
+  document.getElementById('detail_original').textContent = original ? '原名: ' + original : '';
+  document.getElementById('detail_year').textContent = year || '??';
+  document.getElementById('detail_type').textContent = mediaType === 'movie' ? '电影' : '电视剧';
+  document.getElementById('detail_rating').textContent = rating || '—';
+  document.getElementById('detail_overview').textContent = overview || '暂无简介';
+  document.getElementById('detail_path').textContent = path;
+  _detailPath = path;
+  document.getElementById('detail_modal').style.display = 'block';
+}
+
+function closeDetail() {
+  document.getElementById('detail_modal').style.display = 'none';
+}
+
+function copyPath() {
+  if (navigator.clipboard && _detailPath) {
+    navigator.clipboard.writeText(_detailPath).then(function() {
+      alert('路径已复制到剪贴板');
+    }).catch(function() {
+      alert('复制失败，路径: ' + _detailPath);
+    });
+  }
+}
+
+function playOnline() {
+  if (_detailItemId) {
+    window.open('/play/' + _detailItemId, '_blank');
+  }
+}
+
+function playPotPlayer() {
+  // Build the stream URL and copy it for PotPlayer
+  var url = window.location.origin + '/api/stream/' + _detailItemId;
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(url).then(function() {
+      alert('流地址已复制到剪贴板！\n\n在 PotPlayer 中按 Ctrl+U，粘贴此地址即可播放：\n' + url);
+    }).catch(function() {
+      alert('PotPlayer 流地址（请手动复制）：\n' + url);
+    });
+  } else {
+    prompt('PotPlayer 流地址（Ctrl+C 复制，然后在 PotPlayer 中 Ctrl+U 粘贴）：', url);
+  }
+}
+
+// Close modal on background click
+document.addEventListener('click', function(e) {
+  var modal = document.getElementById('detail_modal');
+  if (modal.style.display === 'block' && !modal.contains(e.target) && !e.target.closest('.poster-card')) {
+    closeDetail();
+  }
+});
+</script>
+{% endblock %}

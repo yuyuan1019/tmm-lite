@@ -1649,7 +1649,9 @@ async def test_rescrape_reparses_folder_name(tmp_path: Path) -> None:
 
     await runner.rescrape_item(item_id)
 
-    assert tmdb.search_and_fetch.await_args.args[0] == "蚁人1"
+    # Parser now extracts the English title from the post-bracket region
+    # ("Ant Man") since it matches TMDB better than the CJK title.
+    assert tmdb.search_and_fetch.await_args.args[0] == "Ant Man"
 
 
 # ---------------------------------------------------------------------------

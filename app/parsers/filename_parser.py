@@ -44,10 +44,19 @@ _NOISE_WORDS: set[str] = {
     "dvdrip", "remux", "hdrip", "cam",
     # Codec / audio
     "x264", "x265", "h264", "h.264", "h265", "h.265", "hevc", "avc", "av1",
-    "aac", "ac3", "dts", "dts-hd", "truehd", "atmos", "ddp5.1", "dd5.1", "flac", "2audio",
+    "aac", "ac3", "dts", "dts-hd", "dts-x", "truehd", "atmos", "ddp5.1", "dd5.1", "flac", "2audio",
+    "7.1", "5.1", "2.0",
+    # Collection / box-set markers (these are container folders, not movie titles)
+    "collection", "film collection", "movie collection", "box set", "boxset",
+    "trilogy", "tetralogy", "quadrilogy", "anthology",
     # Chinese labels
     "国语", "粤语", "国粤双语", "国语中字", "中字", "中英字幕", "简繁", "双语", "高清", "蓝光",
     "完整版", "未删减", "修复版", "重制版", "特效字幕",
+    # Chinese collection markers
+    "合集", "集锦", "大合集", "电影合集", "套装", "合辑", "系列合集", "合集版",
+    "部合集", "部全",
+    # Multi-audio labels (common in collection releases)
+    "multi-audio", "multi audio",
 }
 
 # Sort by length descending so longer phrases match before substrings.
@@ -94,7 +103,7 @@ _RE_BARE_YEAR = re.compile(
 
 # Release group suffix: trailing "-UPPERCASE/ALPHANUM" at end of string
 _RE_RELEASE_GROUP = re.compile(
-    r"-(?=[A-Z0-9])[^-]*[A-Z][A-Z0-9]*$"
+    r"-(?=[A-Za-z0-9])[^-]*[A-Za-z][A-Za-z0-9]*$"
 )
 
 # Leading collection index in Chinese media naming: "14.奇异博士1" -> "奇异博士1".
@@ -114,10 +123,23 @@ _RE_SEASON_COUNT = re.compile(r"全(?:\d{1,3}|[一二三四五六七八九十百
 # Chars to replace with space
 _RE_DOT_UNDERSCORE = re.compile(r"[._]+")
 
+# Normalise concatenated codec+number patterns so boundary-aware noise-word
+# removal can work: "TrueHD7.1" → "TrueHD 7.1", "Atmos7.1" → "Atmos 7.1".
+_RE_CODEC_NUMBER = re.compile(
+    r"(TrueHD|DTS[\-XHD]*|Atmos|HEVC|AVC|DD5|DDP5|FLAC)(\d)",
+    re.IGNORECASE,
+)
+
 # Leftover unmatched brackets / punctuation at title boundaries after year extraction
 # ("美国队长1 复仇者先锋(" → "美国队长1 复仇者先锋")
 # Leading: closing brackets (orphaned closers).  Trailing: opening brackets (orphaned openers).
 _RE_TRAILING_JUNK = re.compile(r"^[\s.)）\]】〕〉》]+|[\s.(（\[【〔〈《]+$")
+
+# Detect Latin (English) characters in a string
+_RE_HAS_LATIN = re.compile(r"[a-zA-Z]")
+
+# Detect CJK characters in a string
+_RE_HAS_CJK = re.compile(r"[一-鿿]")
 
 
 # ---------------------------------------------------------------------------
@@ -196,11 +218,15 @@ def _parse_impl(name: str) -> ParsedName:
     # Step 4: extract year
     year: int | None = None
     title_start: int = 0  # pos of year match start (title region = work[:title_start])
+    post_year_region: str = ""  # text after bracket-year for PTer English-title extraction
 
     m_bracket = _RE_BRACKET_YEAR.search(work)
     if m_bracket:
         year = int(m_bracket.group("year"))
         title_start = m_bracket.start()
+        # Capture text after the year bracket.  In PTer/FRDS naming the
+        # English title lives here: "04.雷神1.索尔.(2011).Thor 2011..."
+        post_year_region = work[m_bracket.end():]
     else:
         # Find all bare years, take the last one
         bare_matches = list(_RE_BARE_YEAR.finditer(work))
@@ -236,6 +262,21 @@ def _parse_impl(name: str) -> ParsedName:
     # Step 7: clean title region
     title = _clean_title(title_region)
 
+    # Step 7b: if the title is primarily CJK and the post-bracket-year region
+    # yields a Latin (English) title, prefer the English title — it matches
+    # TMDB far better.  PTer/FRDS naming convention:
+    #   "04.雷神1.索尔.(2011).Thor 2011 UHD BluRay..."
+    #                                    ^^^^ English title after the year bracket
+    if post_year_region and title and _RE_HAS_CJK.search(title):
+        # Strip bare years from the post-year region before cleaning so
+        # "Thor 2011 UHD BluRay..." becomes "Thor" rather than "Thor 2011".
+        post_no_years = _RE_BARE_YEAR.sub(" ", post_year_region)
+        alt = _clean_title(post_no_years)
+        # Only use the Latin title when it is substantial — at least 4 chars
+        # or multi-word — to avoid replacing with leftover codec labels.
+        if alt and _RE_HAS_LATIN.search(alt) and (len(alt) >= 4 or " " in alt):
+            title = alt
+
     # Step 8: empty title → None
     if not title:
         return ParsedName(None, year, season, episode)
@@ -254,6 +295,10 @@ def _clean_title(region: str) -> str | None:
     """Clean a title region string, returning None if nothing remains."""
     # Step 7a: drop a leading collection index ("14.奇异博士1" -> "奇异博士1")
     region = _RE_LEADING_INDEX.sub("", region, count=1)
+
+    # Step 7a2: normalise concatenated codec+number (TrueHD7.1 → TrueHD 7.1)
+    # so boundary-aware noise-word removal can find the parts.
+    region = _RE_CODEC_NUMBER.sub(r"\1 \2", region)
 
     # Step 7b: remove release group suffix
     region = _RE_RELEASE_GROUP.sub("", region)

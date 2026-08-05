@@ -37,9 +37,10 @@ _PARAMS = [
     ("国语中字.某电影.2020.WEB-DL", ParsedName("某电影", 2020, None, None)),
     # M3-T13: full combo: title + year + season + episode
     ("繁花.2023.S01E01.mkv", ParsedName("繁花", 2023, 1, 1)),
-    # M3-T14: leading collection index "14." stripped (Chinese title follows)
+    # M3-T14: leading collection index stripped, English title preferred from
+    # post-bracket region (matches TMDB better than Chinese title)
     ("14.奇异博士1(2016).Doctor Strange 2016 UHD BluRay REMUX 2160p HEVC Atmos TrueHD 7.1-PTer",
-     ParsedName("奇异博士1", 2016, None, None)),
+     ParsedName("Doctor Strange", 2016, None, None)),
     # M3-T15: leading index with underscore separator
     ("12_三国演义 (1994)", ParsedName("三国演义", 1994, None, None)),
     # M3-T16: Latin title keeps leading number (not an index)
@@ -48,17 +49,18 @@ _PARAMS = [
     ("007：大破天幕杀机 (2012)", ParsedName("007：大破天幕杀机", 2012, None, None)),
     # M3-T18: Chinese season-count marker stripped ("[全7季]")
     ("黑镜 Black Mirror[全7季]", ParsedName("黑镜 Black Mirror", None, None, None)),
-    # M3-T19: double-dot leading index stripped ("28..奇异博士2" → title preserved)
+    # M3-T19: double-dot leading index stripped, English title preferred from
+    # post-bracket region (matches TMDB better than Chinese title)
     ("28..奇异博士2：疯狂多元宇宙.(2022).Doctor.Strange.in.the.Multiverse.of.Madness.2022.UHD.BluRay.REMUX.2160p.HEVC.TrueHD7.1.Atmos-HDS",
-     ParsedName("奇异博士2：疯狂多元宇宙", 2022, None, None)),
+     ParsedName("Doctor Strange in the Multiverse of Madness", 2022, None, None)),
     # M3-T20: Chinese "第03季" season marker extracted + stripped from title
     ("无耻家庭.第03季.Shameless.S03.2013.1080p.AMZN.WEB-DL.AC3.x265.10bit-Yumi@FRDS",
      ParsedName("无耻家庭 Shameless", 2013, 3, None)),
     # M3-T21: Chinese numeral season count "全十一季" stripped
     ("无耻家庭.全十一季", ParsedName("无耻家庭", None, None, None)),
-    # M3-T22: double bracket "((2011)" → year extracted, no trailing "(" in title
+    # M3-T22: double bracket "((2011)" → year extracted, English title preferred
     ("05.美国队长1.复仇者先锋((2011).Captain America The First Avenger 2011 UHD BluRay REMUX 2160p HEVC Atmos TrueHD 7.1-PTer",
-     ParsedName("美国队长1 复仇者先锋", 2011, None, None)),
+     ParsedName("Captain America The First Avenger", 2011, None, None)),
 ]
 
 
@@ -162,3 +164,59 @@ def test_multiple_years_bracket_first() -> None:
     result = parse_folder_name("2012 (2009)")
     assert result.year == 2009
     assert result.title == "2012"
+
+
+# ---------------------------------------------------------------------------
+# Collection / box-set folder name tests
+# ---------------------------------------------------------------------------
+
+
+def test_collection_noise_word_stripped() -> None:
+    """'Collection' is stripped from movie titles."""
+    result = parse_folder_name(
+        "Pirates.of.the.Caribbean.Collection.2003-2017.UHD.BluRay.2160p.x265-beAst"
+    )
+    assert result.title is not None
+    assert "Collection" not in result.title
+    assert "Pirates of the Caribbean" in result.title
+
+
+def test_collection_folder_parseable() -> None:
+    """Chinese collection folder names are parseable (detection happens at scanner level).
+
+    The scanner's _RE_COLLECTION_DIR regex detects and skips these folders.
+    The parser just needs to extract a usable title.
+    """
+    result = parse_folder_name("漫威电影合集.2008-2023.31部.4K高清.REMUX版")
+    assert result.title is not None
+    assert result.year == 2023
+
+
+# ---------------------------------------------------------------------------
+# Post-bracket English title extraction (PTer/FRDS naming)
+# ---------------------------------------------------------------------------
+
+
+def test_pter_english_title_preferred() -> None:
+    """English title after bracket year is preferred for PTer naming."""
+    result = parse_folder_name(
+        "04.雷神1.索尔.(2011).Thor 2011 UHD BluRay REMUX 2160p HEVC Atmos TrueHD 7.1-PTer"
+    )
+    assert result.title == "Thor"
+    assert result.year == 2011
+
+
+def test_no_bracket_year_no_english_extraction() -> None:
+    """Without bracket year, standard title extraction is used."""
+    result = parse_folder_name("星际穿越 (2014)")
+    assert result.title == "星际穿越"
+    assert result.year == 2014
+
+
+def test_pter_english_title_for_antman() -> None:
+    """PTer naming with Ant-Man: English title extracted."""
+    result = parse_folder_name(
+        "12.蚁人1(2015).Ant Man 2015 UHD BluRay REMUX 2160p HEVC Atmos TrueHD 7.1-PTer"
+    )
+    assert result.title == "Ant Man"
+    assert result.year == 2015

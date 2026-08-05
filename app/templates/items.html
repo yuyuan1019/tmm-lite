@@ -9,6 +9,13 @@
   {% endfor %}
 </div>
 
+<div class="actions">
+  <form method="post" action="/items/refresh-subtitles" style="margin:0"
+        onsubmit="return confirm('将为所有非中文标题的已匹配条目下载字幕。确定？');">
+    <button type="submit" {% if is_running %}disabled{% endif %}>🔄 一键刷新字幕（非中文标题）</button>
+  </form>
+</div>
+
 {% if ignored_count %}
 <div class="notice">
   已忽略（删除记录、未删文件）{{ ignored_count }} 条，重新扫描时不会重新加入。
@@ -45,16 +52,18 @@
   <td><span class="badge badge-{{ item.status }}">{{ item.status }}</span></td>
   <td title="{{ item.error_message or '' }}">{{ (item.error_message or '')[:50] }}</td>
   <td>
-    <button type="button" {% if is_running %}disabled{% endif %}
-            onclick="openRescrape(this, {{ item.id }}, '{{ item.media_type }}')"
-            data-title="{{ item.parsed_title or '' }}">重新刮削</button>
-    <form method="post" action="/items/{{ item.id }}/subtitle">
-      <button type="submit" {% if is_running %}disabled{% endif %} title="手动下载字幕">字幕</button>
-    </form>
-    <form method="post" action="/items/{{ item.id }}/delete"
-          onsubmit="return confirm('仅删除列表记录，不删除磁盘文件。确定删除？');">
-      <button type="submit" {% if is_running %}disabled{% endif %} title="仅删除记录，磁盘文件不动">删除</button>
-    </form>
+    <div class="action-cell">
+      <button type="button" {% if is_running %}disabled{% endif %}
+              onclick="openRescrape(this, {{ item.id }}, '{{ item.media_type }}')"
+              data-title="{{ item.parsed_title or '' }}">重新刮削</button>
+      <form method="post" action="/items/{{ item.id }}/subtitle">
+        <button type="submit" {% if is_running %}disabled{% endif %} title="手动下载字幕">字幕</button>
+      </form>
+      <form method="post" action="/items/{{ item.id }}/delete"
+            onsubmit="return confirm('仅删除列表记录，不删除磁盘文件。确定删除？');">
+        <button type="submit" {% if is_running %}disabled{% endif %} title="仅删除记录，磁盘文件不动">删除</button>
+      </form>
+    </div>
   </td>
 </tr>
 {% endfor %}

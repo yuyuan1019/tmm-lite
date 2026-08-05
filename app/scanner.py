@@ -85,6 +85,16 @@ _NOISE_DIR_NAMES: frozenset[str] = frozenset({
 # (English "Season 01", compact "S01", or Chinese "第1季").
 _RE_SEASON_DIR = re.compile(r"(?i)^(?:season[ ._]?\d{1,2}|s\d{1,2}|第\d{1,2}季)$")
 
+# Collection / box-set container folders — these hold multiple movies and
+# should never be scraped as a single title.
+_RE_COLLECTION_DIR = re.compile(
+    r"(?i)(?:collection|box[ ._-]?set|trilogy|tetralogy|quadrilogy|anthology|"
+    r"全集|合集|集锦|大合集|电影合集|系列合集|合集版|套装|合辑|"
+    r"\d+[ ._-]*film[ ._-]*collection|"
+    r"\d+[ ._-]*movie[ ._-]*collection|"
+    r"\d+部)"
+)
+
 # Disc-structure sub-folders that mark a movie folder (folder_path = parent).
 _DISC_STRUCTURE_DIRS: frozenset[str] = frozenset({"bdmv", "video_ts"})
 
@@ -341,6 +351,12 @@ async def _discover_walk(
             # Loose videos in the library root are individual file items.
             for v in videos:
                 found.add(normalize_path(str(PurePosixPath(lib.path) / v)))
+        elif _RE_COLLECTION_DIR.search(name):
+            # Collection / box-set container folder — recurse into its
+            # children but do NOT treat the folder itself as a movie.
+            for d in subdirs:
+                await _discover_walk(conn, lib, _join_rel(rel, d), found, is_root=False)
+            return
         elif videos or has_disc_subdir:
             # A folder that directly holds a video — or a disc structure
             # (Movie/BDMV, Movie/VIDEO_TS) — is one movie.  Stop descending so
@@ -356,6 +372,11 @@ async def _discover_walk(
         for d in subdirs:
             await _discover_walk(conn, lib, _join_rel(rel, d), found, is_root=False)
     else:  # tv
+        if not is_root and _RE_COLLECTION_DIR.search(name):
+            # Collection / box-set container — recurse, don't add as a show.
+            for d in subdirs:
+                await _discover_walk(conn, lib, _join_rel(rel, d), found, is_root=False)
+            return
         if not is_root and (
             videos
             or any(_RE_SEASON_DIR.match(s) for s in subdirs)
@@ -607,6 +628,11 @@ class ScanRunner:
             return await self._download_subtitle_impl(item_id)
         finally:
             self._release()
+
+    def start_refresh_subtitles_background(self) -> asyncio.Task[ScrapeLog]:
+        """Start a background task that downloads subtitles for all matched
+        items whose title is not primarily Chinese (non-CJK matched title)."""
+        return self._start_background(self._refresh_subtitles_impl())
 
     async def shutdown(self) -> None:
         """Graceful shutdown: reject new work, wait for current task."""
@@ -1070,6 +1096,123 @@ class ScanRunner:
                         sub_log.matched = matched
                         sub_log.failed = failed
                         sub_log.detail = detail
+
+    # ------------------------------------------------------------------
+    # Batch subtitle refresh
+    # ------------------------------------------------------------------
+
+    async def _refresh_subtitles_impl(self) -> ScrapeLog:
+        """Download subtitles for all matched items with non-Chinese titles.
+
+        Skips items whose ``matched_original_title`` or ``matched_title`` is
+        primarily Chinese (contains CJK characters), since those already have
+        matching Chinese-language subtitles or don't need external ones.
+        """
+        import re
+
+        _RE_CJK = re.compile(r"[一-鿿]")
+
+        if not self._config.subtitle_enabled or self._subtitle is None:
+            raise ScrapeError("字幕功能未启用，请在设置中开启")
+
+        # Collect eligible items in a short transaction
+        with self._session_factory() as sess:
+            rows = sess.execute(
+                select(MediaItem).where(
+                    MediaItem.status == "matched",
+                    MediaItem.matched_title.isnot(None),
+                )
+            ).scalars().all()
+
+        eligible: list[MediaItem] = []
+        for item in rows:
+            # Prefer the original (usually English) title for the language check
+            check_title = item.matched_original_title or item.matched_title or ""
+            if not check_title:
+                continue
+            if _RE_CJK.search(check_title):
+                continue  # Skip Chinese-titled items
+            # Also require at least a poster URL or imdb_id to avoid scraping
+            # items that won't get good subtitle matches
+            eligible.append(item)
+
+        total = len(eligible)
+        matched = 0
+        failed = 0
+        detail_lines: list[str] = []
+
+        log_id: int | None = None
+        with self._session_factory.begin() as sess:
+            log = ScrapeLog(
+                started_at=datetime.now(UTC),
+                total=total, matched=0, failed=0,
+            )
+            sess.add(log)
+            sess.flush()
+            log_id = log.id
+
+        for index, item in enumerate(eligible):
+            target = self._load_target(item.id)
+            if target is None:
+                continue
+            conn = _library_connection_from_target(target, self._enc_key)
+            if self._stop_requested:
+                msg = "任务已手动停止"
+                remaining = eligible[index:]
+                with self._session_factory.begin() as sess:
+                    for it in remaining:
+                        detail_lines.append(f"{it.folder_path}: {msg}")
+                failed += len(remaining)
+                self._log_progress(msg)
+                break
+            self._log_progress(f"正在下载字幕: {item.folder_path}")
+            try:
+                title = item.matched_original_title or item.matched_title or ""
+                year = item.matched_year or item.parsed_year
+                result = await self._download_subtitle_for_target(
+                    target, conn, title=title, year=year, imdb_id=item.imdb_id,
+                )
+                if result is not None:
+                    matched += 1
+                    detail_lines.append(f"字幕已下载: {item.folder_path} -> {result.name}")
+                    self._log_progress(f"字幕已下载: {item.folder_path}")
+                else:
+                    detail_lines.append(f"未找到字幕: {item.folder_path}")
+                    self._log_progress(f"未找到字幕: {item.folder_path}")
+            except asyncio.CancelledError:
+                stop_msg = "任务已手动停止" if self._stop_requested else "任务因应用关闭而取消"
+                remaining = eligible[index:]
+                with self._session_factory.begin() as sess:
+                    for it in remaining:
+                        detail_lines.append(f"{it.folder_path}: {stop_msg}")
+                failed += len(remaining)
+                self._log_progress(stop_msg)
+                raise
+            except Exception as exc:  # noqa: BLE001 (item isolation)
+                failed += 1
+                detail_lines.append(f"{item.folder_path}: {exc}")
+                self._log_progress(f"字幕下载失败: {item.folder_path}: {exc}")
+            finally:
+                await conn.aclose()
+
+        if log_id is not None:
+            with self._session_factory.begin() as sess:
+                existing_log = sess.get(ScrapeLog, log_id)
+                if existing_log is not None:
+                    existing_log.finished_at = datetime.now(UTC)
+                    existing_log.total = total
+                    existing_log.matched = matched
+                    existing_log.failed = failed
+                    existing_log.detail = "\n".join(detail_lines) if detail_lines else None
+        self._log_progress(
+            f"字幕刷新完成: 总计 {total} / 已下载 {matched} / 未找到或失败 {failed}"
+        )
+
+        with self._session_factory() as sess:
+            final_log = sess.get(ScrapeLog, log_id)
+            if final_log is None:
+                raise RuntimeError(f"ScrapeLog {log_id} not found after subtitle refresh")
+            return final_log
 
     # ------------------------------------------------------------------
     # Core scrape logic

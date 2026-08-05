@@ -313,13 +313,17 @@ def test_strip_cjk_sequence_number() -> None:
 
     assert _strip_cjk_sequence_number("奇异博士1") == "奇异博士"
     assert _strip_cjk_sequence_number("流浪地球2") == "流浪地球"
-    # No trailing digit → unchanged
-    assert _strip_cjk_sequence_number("奇异博士2：疯狂多元宇宙") == "奇异博士2：疯狂多元宇宙"
+    # Mid-title digit after CJK before separator → stripped
+    assert _strip_cjk_sequence_number("奇异博士2：疯狂多元宇宙") == "奇异博士：疯狂多元宇宙"
     # Digit not immediately after CJK → unchanged
     assert _strip_cjk_sequence_number("猎杀T34") == "猎杀T34"
     # Non-Chinese titles → unchanged
     assert _strip_cjk_sequence_number("2012") == "2012"
     assert _strip_cjk_sequence_number("Blade Runner 2049") == "Blade Runner 2049"
+    # Mid-title CJK+digits: "雷神1 索尔" → "雷神 索尔"
+    assert _strip_cjk_sequence_number("雷神1 索尔") == "雷神 索尔"
+    # "雷神3：诸神黄昏" → "雷神：诸神黄昏"
+    assert _strip_cjk_sequence_number("雷神3：诸神黄昏") == "雷神：诸神黄昏"
 
 
 @pytest.mark.asyncio

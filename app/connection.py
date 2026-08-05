@@ -72,6 +72,20 @@ class Connection(ABC):
     async def read_bytes(self, path: str) -> bytes:
         ...
 
+    async def read_range(self, path: str, offset: int, size: int) -> bytes:
+        """Read *size* bytes starting at *offset* from *path*.
+
+        The default implementation reads the whole file and slices — override
+        in subclasses for efficient chunked access.
+        """
+        data = await self.read_bytes(path)
+        return data[offset:offset + size]
+
+    async def file_size(self, path: str) -> int:
+        """Return the size of the file at *path* in bytes."""
+        data = await self.read_bytes(path)
+        return len(data)
+
     @abstractmethod
     async def write_bytes(self, path: str, data: bytes) -> None:
         ...
@@ -127,6 +141,15 @@ class LocalConnection(Connection):
 
     async def read_bytes(self, path: str) -> bytes:
         return _resolve(self._root, path).read_bytes()
+
+    async def read_range(self, path: str, offset: int, size: int) -> bytes:
+        p = _resolve(self._root, path)
+        with open(p, "rb") as f:
+            f.seek(offset)
+            return f.read(size)
+
+    async def file_size(self, path: str) -> int:
+        return _resolve(self._root, path).stat().st_size
 
     async def write_bytes(self, path: str, data: bytes) -> None:
         target = _resolve(self._root, path)

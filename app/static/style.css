@@ -30,8 +30,8 @@ h2 { margin: 20px 0 12px; }
 .tab.active { background: #2c3e50; color: white; }
 
 table { width: 100%; border-collapse: collapse; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
-th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #eee; font-size: 14px; }
-th { background: #f8f9fa; font-weight: 600; }
+th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid #eee; font-size: 13px; }
+th { background: #f8f9fa; font-weight: 600; white-space: nowrap; }
 
 .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; }
 .badge-pending { background: #e2e3e5; color: #383d41; }
@@ -44,6 +44,10 @@ th { background: #f8f9fa; font-weight: 600; }
 .text-muted { color: #aaa; }
 
 form { margin-bottom: 16px; }
+td form { display: inline; margin: 0; }
+td .action-cell { display: flex; gap: 6px; flex-wrap: nowrap; align-items: center; }
+td .action-cell form { display: inline; margin: 0; }
+td .action-cell button { padding: 5px 10px; font-size: 12px; white-space: nowrap; }
 fieldset { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px; background: white; }
 legend { font-weight: 600; padding: 0 8px; }
 label { display: block; margin-bottom: 8px; }
@@ -61,3 +65,51 @@ details pre { background: #f8f9fa; padding: 8px; border-radius: 4px; overflow-x:
 .path-full { margin-top: 4px; padding: 6px 8px; background: #f8f9fa; border-radius: 4px; font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; white-space: normal; }
 
 .info p { margin-bottom: 6px; font-size: 14px; color: #666; }
+
+/* Poster grid preview page */
+.preview-toolbar { margin-bottom: 20px; }
+.genre-section { margin-bottom: 32px; }
+.genre-section h2 { margin-bottom: 12px; padding-bottom: 6px; border-bottom: 2px solid #2c3e50; }
+
+.poster-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 16px;
+}
+.poster-card {
+  background: white;
+  border-radius: 6px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+  overflow: hidden;
+  transition: transform 0.15s, box-shadow 0.15s;
+  cursor: pointer;
+}
+.poster-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.18);
+}
+.poster-img-wrap { position: relative; width: 100%; padding-top: 150%; overflow: hidden; background: #e9ecef; }
+.poster-img {
+  position: absolute; top: 0; left: 0;
+  width: 100%; height: 100%;
+  object-fit: cover;
+}
+.poster-placeholder {
+  width: 100%; padding-top: 150%;
+  background: #dee2e6;
+  display: flex; align-items: center; justify-content: center;
+  position: relative;
+}
+.poster-placeholder.large { padding-top: 150%; }
+.poster-placeholder span {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  font-size: 18px; color: #868e96; font-weight: 600;
+}
+.poster-info { padding: 8px 10px; }
+.poster-title {
+  font-size: 13px; font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  margin-bottom: 4px;
+}
+.poster-meta { font-size: 12px; color: #888; display: flex; gap: 8px; }
+.poster-rating { color: #f39c12; }

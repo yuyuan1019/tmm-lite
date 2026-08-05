@@ -357,9 +357,22 @@ def _strip_cjk_sequence_number(title: str) -> str:
     e.g. ``"奇异博士1"`` → ``"奇异博士"`` (TMDB titles omit the ``"1"``).
     Only matches a digit-run immediately after a CJK character, so English
     titles and titles like ``"猎杀T34"`` are left unchanged.
+
+    Also handles digits after CJK mid-title:
+    ``"雷神1 索尔"`` → ``"雷神 索尔"``
     """
-    m = re.match(r"^(.*[一-鿿])(\d+)$", title.strip())
-    return m.group(1) if m else title
+    t = title.strip()
+    # Pattern 1: trailing digits after CJK — "奇异博士1" → "奇异博士"
+    m = re.match(r"^(.*[一-鿿])(\d+)$", t)
+    if m:
+        return m.group(1)
+    # Pattern 2: CJK+digits mid-title before a space/separator
+    # "雷神1 索尔" → "雷神 索尔", "雷神3：诸神黄昏" → "雷神 诸神黄昏"
+    result = re.sub(r"(?<=[一-鿿])\d+(?=[\s.．、：:·\-—])", "", t)
+    result = re.sub(r"\s+", " ", result).strip()
+    if result and result != t:
+        return result
+    return title
 
 
 def _parse_retry_after(header: str | None) -> float:
