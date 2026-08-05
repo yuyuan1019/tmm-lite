@@ -973,10 +973,27 @@ def create_app(
             # Find the video file
             from app.scanner import _find_video_file_async, _relative_folder
             rel = _relative_folder(item.folder_path, lib.path)
-            video_rel = await _find_video_file_async(conn, rel)
+
+            # First check: is the item itself a loose video file?
+            if Path(rel).suffix.lower() in VIDEO_EXTENSIONS:
+                video_rel = rel
+            else:
+                video_rel = await _find_video_file_async(conn, rel)
+                # Fallback: search deeper (some folder structures nest video
+                # files more than 2 levels deep, e.g. BDMV/STREAM/xxx.m2ts)
+                if video_rel is None:
+                    video_rel = await _find_video_deep(conn, rel)
+
             if video_rel is None:
+                logger.warning(
+                    "Stream: no video file found for item %s (rel=%s)",
+                    item_id, rel,
+                )
                 await conn.aclose()
-                return JSONResponse({"error": "no video file found"}, status_code=404)
+                return JSONResponse(
+                    {"error": f"未找到可播放的视频文件: {rel}"},
+                    status_code=404,
+                )
 
             # Determine file size and MIME type
             file_size = await conn.file_size(video_rel)
@@ -1352,6 +1369,39 @@ setTimeout(function() {{
 </script>
 </body>
 </html>"""
+
+
+async def _find_video_deep(conn: Any, rel: str, depth: int = 4) -> str | None:
+    """Recursively search for a video file under *rel* up to *depth* levels.
+
+    Used as a fallback when the standard 2-level search doesn't find anything
+    (e.g. deeply nested BDMV structures or non-standard layouts).
+    """
+    if depth <= 0:
+        return None
+    try:
+        entries = await conn.list_dir(rel)
+    except OSError:
+        return None
+    # Check files first (prefer shallowest)
+    for name in sorted(entries):
+        child = str(PurePosixPath(rel) / name)
+        try:
+            if await conn.is_file(child) and Path(name).suffix.lower() in VIDEO_EXTENSIONS:
+                return child
+        except OSError:
+            continue
+    # Then recurse into subdirs
+    for name in sorted(entries):
+        child = str(PurePosixPath(rel) / name)
+        try:
+            if await conn.is_dir(child):
+                found = await _find_video_deep(conn, child, depth - 1)
+                if found is not None:
+                    return found
+        except OSError:
+            continue
+    return None
 
 
 def _video_mime(ext: str) -> str:
