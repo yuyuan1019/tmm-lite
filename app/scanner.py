@@ -640,10 +640,36 @@ class ScanRunner:
     def start_rescrape_item_background(
         self, item_id: int, *, query: str | None = None, tmdb_id: int | None = None,
     ) -> asyncio.Task[MediaItem]:
-        """Like :meth:`rescrape_item` but returns immediately; runs in background."""
-        return self._start_background(
-            self._rescrape_item_impl(item_id, query=query, tmdb_id=tmdb_id)
-        )
+        """Like :meth:`rescrape_item` but returns immediately; runs in background.
+
+        Uses a lightweight lock check instead of the full mutex so the items
+        page UI does not freeze while the rescrape is in progress.
+        """
+        if not self._accepting:
+            raise ScanBusyError("Scanner is shutting down")
+
+        async def _run() -> MediaItem:
+            if self._running:
+                raise ScanBusyError("任务正在运行中，请稍后")
+            self._running = True
+            try:
+                return await self._rescrape_item_impl(item_id, query=query, tmdb_id=tmdb_id)
+            finally:
+                self._running = False
+
+        task = asyncio.create_task(_run())
+        self._current_task = task
+
+        def _done(t: asyncio.Task[object]) -> None:
+            self._running = False
+            self._current_task = None
+            if not t.cancelled():
+                exc = t.exception()
+                if exc is not None:
+                    logger.error("Background rescrape failed: %s", exc)
+
+        task.add_done_callback(_done)
+        return task
 
     async def download_subtitle(self, item_id: int) -> Path | None:
         """Manually download subtitles for a single item.
