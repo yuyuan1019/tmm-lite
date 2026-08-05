@@ -42,14 +42,21 @@
       <input type="checkbox" name="subtitle_enabled" {% if config.subtitle_enabled %}checked{% endif %}> 启用自动字幕下载
     </label>
     <label>
-      OpenSubtitles API Key：<input type="password" name="opensubtitles_api_key" placeholder="{% if config.opensubtitles_api_key %}已设置{% else %}未设置{% endif %}" style="width:300px">
+      ASSRT Token（伪射手网，主源，中文优先）：<input type="password" name="assrt_token" placeholder="{% if config.assrt_token %}已设置(****{{ config.assrt_token[-4:] }}){% else %}未设置{% endif %}" style="width:300px">
+      <a href="https://assrt.net/usercp.php" target="_blank" style="font-size:12px; margin-left:8px;">📋 获取 Token →</a>
+    </label>
+    <label>
+      OpenSubtitles API Key（备用）：<input type="password" name="opensubtitles_api_key" placeholder="{% if config.opensubtitles_api_key %}已设置{% else %}未设置{% endif %}" style="width:300px">
       <a href="https://www.opensubtitles.com/consumers" target="_blank" style="font-size:12px; margin-left:8px;">📋 申请 API Key →</a>
+    </label>
+    <label>
+      OpenSubtitles User-Agent：<input type="text" name="opensubtitles_user_agent" value="{{ config.opensubtitles_user_agent }}" placeholder="TMM-Lite" style="width:300px">
     </label>
     <label>
       首选语言（ISO 639-2 码，逗号分隔）：
       <input type="text" name="subtitle_languages" value="{{ config.subtitle_languages }}" placeholder="chi,zho,zh">
     </label>
-    <p><small>常用码：chi/zho=中文, eng=英语, jpn=日语, kor=韩语。OpenSubtitles 需免费注册 API Key。下载失败不影响刮削状态。</small></p>
+    <p><small>字幕源优先级：ASSRT（伪射手网，主源，中文优先）→ OpenSubtitles → SubDL。ASSRT/OS 均需免费注册获取 Token/Key。Token/Key 留空表示不修改已保存值。下载失败不影响刮削状态。</small></p>
   </fieldset>
 
   <fieldset>

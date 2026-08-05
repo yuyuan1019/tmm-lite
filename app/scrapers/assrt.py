@@ -37,7 +37,11 @@ class AssrtScraper:
             follow_redirects=True,
         )
         self._last_request_time = 0.0
-        self._min_interval = 3.0  # 20 req/min shared per token + IP
+        # ASSRT free tier is often 5 req/min (shared per token + IP); 12s
+        # between API calls stays safely under that. A subtitle = 2 API calls
+        # (search + detail); the file download hits file*.assrt.net (signed
+        # URL, not token-authed) and is not counted against this quota.
+        self._min_interval = 12.0
 
     async def search(
         self,

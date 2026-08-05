@@ -813,6 +813,8 @@ def create_app(
         subtitle_enabled = form.get("subtitle_enabled") == "on"
         os_api_key = str(form.get("opensubtitles_api_key", ""))
         subtitle_langs = str(form.get("subtitle_languages", "chi,zho,zh"))
+        assrt_tok = str(form.get("assrt_token", ""))
+        os_user_agent = str(form.get("opensubtitles_user_agent", ""))
         browse_root = str(form.get("browse_root", "/")).strip() or "/"
         proxy = str(form.get("proxy", "")).strip()
 
@@ -862,6 +864,10 @@ def create_app(
                 updates["tmdb_api_key"] = tmdb_key.strip()
             if os_api_key.strip():
                 updates["opensubtitles_api_key"] = os_api_key.strip()
+            # ASSRT token — empty means "don't change" (password field)
+            if assrt_tok.strip():
+                updates["assrt_token"] = assrt_tok.strip()
+            updates["opensubtitles_user_agent"] = os_user_agent.strip() or "TMM-Lite"
 
             # Save old state for rollback
             old_config: AppConfig = request.app.state.config
@@ -895,6 +901,8 @@ def create_app(
                     new_sub = SubtitleDownloader(
                         opensubtitles_api_key=new_config.opensubtitles_api_key,
                         preferred_languages=new_config.subtitle_languages,
+                        opensubtitles_user_agent=new_config.opensubtitles_user_agent,
+                        assrt_token=new_config.assrt_token,
                     )
                 runner.set_subtitle_downloader(new_sub)
                 request.app.state.subtitle_dl = new_sub
@@ -911,6 +919,8 @@ def create_app(
                     "language": old_config.language,
                     "subtitle_enabled": old_config.subtitle_enabled,
                     "opensubtitles_api_key": old_config.opensubtitles_api_key,
+                    "opensubtitles_user_agent": old_config.opensubtitles_user_agent,
+                    "assrt_token": old_config.assrt_token,
                     "subtitle_languages": old_config.subtitle_languages,
                     "browse_root": old_config.browse_root,
                     "proxy": old_config.proxy,
