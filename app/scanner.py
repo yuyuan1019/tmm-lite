@@ -642,6 +642,164 @@ class ScanRunner:
         items whose title is not primarily Chinese (non-CJK matched title)."""
         return self._start_background(self._refresh_subtitles_impl())
 
+    def start_rescan_library_background(self, lib_id: int) -> asyncio.Task[ScrapeLog]:
+        """Re-scan a single library in the background (re-discover + upsert)."""
+        return self._start_background(self._rescan_library_impl(lib_id))
+
+    async def rescan_library(self, lib_id: int) -> ScrapeLog:
+        """Re-scan a single library synchronously."""
+        self._claim()
+        try:
+            return await self._rescan_library_impl(lib_id)
+        finally:
+            self._release()
+
+    async def _rescan_library_impl(self, lib_id: int) -> ScrapeLog:
+        """Re-discover folders for one library and upsert items."""
+        log_id: int | None = None
+        total = matched = failed = 0
+        detail_lines: list[str] = []
+
+        with self._session_factory.begin() as sess:
+            log = ScrapeLog(
+                started_at=datetime.now(UTC),
+                total=0, matched=0, failed=0,
+            )
+            sess.add(log)
+            sess.flush()
+            log_id = log.id
+
+        try:
+            with self._session_factory() as sess:
+                lib = sess.get(Library, lib_id)
+                if lib is None:
+                    raise ItemNotFoundError(f"Library {lib_id} 不存在")
+                lib_path = lib.path
+                lib_name = lib.name
+
+            conn = _library_connection(lib, self._enc_key)
+            self._log_progress(f"重新扫描库: {lib_name} ({lib_path})")
+            try:
+                found = await _discover_folders(conn, lib)
+                with self._session_factory() as sess:
+                    ignored = _ignored_paths(sess)
+                if ignored:
+                    found = {p for p in found if p not in ignored}
+
+                nfo_map: dict[str, bool] = {}
+                for fpath in found:
+                    rel = _relative_folder(fpath, lib_path)
+                    nfo_map[fpath] = await _nfo_exists_async(conn, rel, lib.media_type)
+
+                with self._session_factory.begin() as sess:
+                    for fpath in found:
+                        _upsert_item(
+                            sess, lib, fpath, self._config.overwrite_existing_nfo,
+                            has_nfo=nfo_map.get(fpath, False),
+                        )
+
+                # Mark missing for this library
+                with self._session_factory.begin() as sess:
+                    _mark_missing(sess, {lib_id}, {lib_id: found})
+
+                total = len(found)
+                detail_lines.append(f"库 {lib_name}: 发现 {total} 个条目")
+                self._log_progress(f"库 {lib_name}: 发现 {total} 个条目，重新扫描完成")
+            except Exception:
+                logger.exception("库重新扫描失败: %s", lib_path)
+                detail_lines.append(f"库重新扫描失败: {lib_path}")
+                failed = 1
+            finally:
+                await conn.aclose()
+
+            # Queue found items for scraping (same logic as full scan)
+            statuses = ["pending", "failed"]
+            if self._config.overwrite_existing_nfo:
+                statuses.append("matched")
+
+            with self._session_factory() as sess:
+                rows = sess.execute(
+                    select(MediaItem.id).where(
+                        MediaItem.library_id == lib_id,
+                        MediaItem.status.in_(statuses),
+                    ).order_by(MediaItem.id)
+                ).scalars().all()
+                queue_ids = list(rows)
+
+            # Phase 1: NFO-skippable
+            api_queue_ids: list[int] = []
+            for item_id in queue_ids:
+                target = self._load_target(item_id)
+                if target is None:
+                    continue
+                skip = False
+                if not self._config.overwrite_existing_nfo and target.status == "pending":
+                    conn2 = _library_connection_from_target(target, self._enc_key)
+                    try:
+                        rel2 = _relative_folder(target.folder_path, target.library_path)
+                        skip = await _nfo_exists_async(conn2, rel2, target.media_type)
+                    finally:
+                        await conn2.aclose()
+                if skip:
+                    with self._session_factory.begin() as sess:
+                        item = sess.get(MediaItem, item_id)
+                        if item is not None:
+                            item.status = "matched"
+                            item.error_message = None
+                    matched += 1
+                else:
+                    api_queue_ids.append(item_id)
+
+            # Phase 2: scrape
+            for index, item_id in enumerate(api_queue_ids):
+                target = self._load_target(item_id)
+                if target is None:
+                    continue
+                conn3 = _library_connection_from_target(target, self._enc_key)
+                self._log_progress(f"正在刮削: {target.folder_path}")
+                try:
+                    result = await self._scrape_one(target, force=False, conn=conn3)
+                    with self._session_factory.begin() as sess:
+                        _persist_result(sess, target.id, result)
+                    matched += 1
+                    self._log_progress(f"成功: {target.folder_path}")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    with self._session_factory.begin() as sess:
+                        item = sess.get(MediaItem, item_id)
+                        if item is not None:
+                            item.status = "failed"
+                            item.error_message = str(exc)
+                    failed += 1
+                    detail_lines.append(f"{target.folder_path}: {exc}")
+                    self._log_progress(f"失败: {target.folder_path}: {exc}")
+                finally:
+                    await conn3.aclose()
+
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("rescan_library failed")
+            raise
+        finally:
+            if log_id is not None:
+                with self._session_factory.begin() as sess:
+                    existing_log = sess.get(ScrapeLog, log_id)
+                    if existing_log is not None:
+                        existing_log.finished_at = datetime.now(UTC)
+                        existing_log.total = total
+                        existing_log.matched = matched
+                        existing_log.failed = failed
+                        existing_log.detail = "\n".join(detail_lines) if detail_lines else None
+            self._log_progress(f"库重新扫描完成: 发现 {total} / 成功 {matched} / 失败 {failed}")
+
+        with self._session_factory() as sess:
+            final_log = sess.get(ScrapeLog, log_id)
+            if final_log is None:
+                raise RuntimeError(f"ScrapeLog {log_id} not found after rescan")
+            return final_log
+
     async def shutdown(self) -> None:
         """Graceful shutdown: reject new work, wait for current task."""
         self._accepting = False

@@ -407,6 +407,30 @@ def create_app(
         return _redirect("/libraries", ok=ok_msg)
 
     # ------------------------------------------------------------------
+    # POST /libraries/{id}/rescan
+    # ------------------------------------------------------------------
+
+    @app.post("/libraries/{lib_id}/rescan")
+    async def libraries_rescan(request: Request, lib_id: int) -> Any:
+        """Re-scan a single library in the background."""
+        runner: ScanRunner = request.app.state.runner
+        sess = request.app.state.session_factory()
+        try:
+            lib = sess.get(Library, lib_id)
+            if lib is None:
+                return JSONResponse({"detail": "library not found"}, status_code=404)
+            lib_name = lib.name
+        finally:
+            sess.close()
+
+        try:
+            runner.start_rescan_library_background(lib_id)
+        except ScanBusyError:
+            return _redirect("/libraries", err="任务正在运行中，请稍后")
+
+        return _redirect("/libraries", ok=f"已开始重新扫描库: {lib_name}")
+
+    # ------------------------------------------------------------------
     # POST /libraries/{id}/delete
     # ------------------------------------------------------------------
 

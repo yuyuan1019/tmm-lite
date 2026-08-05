@@ -38,8 +38,8 @@ th { background: #f8f9fa; font-weight: 600; white-space: nowrap; }
 .col-rating { width: 55px; }
 .col-status { width: 85px; }
 .col-subtitle { width: 110px; white-space: nowrap; }
-.col-title { min-width: 120px; }
-.col-matched-title { min-width: 130px; }
+.col-title { min-width: 260px; }
+.col-matched-title { min-width: 260px; }
 .col-error { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .col-actions { width: 180px; }
 

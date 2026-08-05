@@ -19,6 +19,11 @@
   <td>{{ lib.connection_type or 'local' }}</td>
   <td>{{ lib.item_count }}</td>
   <td>
+    <form method="post" action="/libraries/{{ lib.id }}/rescan" style="display:inline"
+          onsubmit="return confirm('将重新扫描此媒体库，发现新文件夹并添加到条目列表。确定？');">
+      <button type="submit" {% if is_running %}disabled{% endif %}
+              style="background:#2980b9;" title="重新发现此库下的所有文件夹">🔄 重新扫描</button>
+    </form>
     <form method="post" action="/libraries/{{ lib.id }}/delete" style="display:inline">
       <button type="submit" {% if is_running %}disabled{% endif %}>删除</button>
     </form>
