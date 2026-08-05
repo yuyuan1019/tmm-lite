@@ -97,6 +97,7 @@ class AppConfig:
     opensubtitles_api_key: str = ""
     subtitle_languages: str = "chi,zho,zh"  # ISO 639-2, comma-separated
     opensubtitles_user_agent: str = "TMM-Lite"  # UA for opensubtitles.com API
+    assrt_token: str = ""  # token for assrt.net (伪射手网) subtitle API
     browse_root: str = "/"  # local browse is clamped under this directory
     proxy: str = ""  # http(s)/socks5 proxy URL for TMDB; empty = no proxy
     libraries_seed: list[LibrarySeed] = field(default_factory=list)
@@ -125,6 +126,7 @@ _ALLOWED_SAVE_KEYS = frozenset({
     "opensubtitles_api_key",
     "subtitle_languages",
     "opensubtitles_user_agent",
+    "assrt_token",
     "browse_root",
     "proxy",
 })
@@ -146,6 +148,7 @@ _DEFAULTS: dict[str, object] = {
     "opensubtitles_api_key": "",
     "subtitle_languages": "chi,zho,zh",
     "opensubtitles_user_agent": "TMM-Lite",
+    "assrt_token": "",
     "browse_root": "/",
     "proxy": "",
     "libraries": [],
@@ -296,6 +299,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         "scheduler_enabled", "libraries",
         "subtitle_enabled", "opensubtitles_api_key", "subtitle_languages",
         "opensubtitles_user_agent",
+        "assrt_token",
         "browse_root", "proxy",
     }
     extra = {k: v for k, v in raw.items() if k not in known_keys}
@@ -313,6 +317,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         opensubtitles_api_key=str(raw.get("opensubtitles_api_key", _DEFAULTS["opensubtitles_api_key"])),
         subtitle_languages=str(raw.get("subtitle_languages", _DEFAULTS["subtitle_languages"])),
         opensubtitles_user_agent=str(raw.get("opensubtitles_user_agent", _DEFAULTS["opensubtitles_user_agent"])),
+        assrt_token=str(raw.get("assrt_token", _DEFAULTS["assrt_token"])),
         browse_root=str(raw.get("browse_root", _DEFAULTS["browse_root"])),
         proxy=str(raw.get("proxy", _DEFAULTS["proxy"])),
         libraries_seed=seeds,
@@ -380,6 +385,7 @@ def save_config(updates: dict[str, object], path: Path | None = None) -> AppConf
         "opensubtitles_api_key": existing.opensubtitles_api_key,
         "subtitle_languages": existing.subtitle_languages,
         "opensubtitles_user_agent": existing.opensubtitles_user_agent,
+        "assrt_token": existing.assrt_token,
         "browse_root": existing.browse_root,
         "proxy": existing.proxy,
         "libraries": [{"name": s.name, "path": s.path, "type": s.type}

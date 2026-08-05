@@ -9,6 +9,7 @@ import logging
 from pathlib import Path
 
 from app.connection import Connection
+from app.scrapers.assrt import AssrtScraper
 from app.scrapers.opensubtitles import OpenSubtitlesScraper, SubtitleResult
 from app.scrapers.subdl import SubDLScraper
 
@@ -46,14 +47,17 @@ class SubtitleDownloader:
         opensubtitles_api_key: str,
         preferred_languages: str = "chi,zho,zh",
         opensubtitles_user_agent: str = "TMM-Lite",
+        assrt_token: str = "",
     ) -> None:
         self._os_key = opensubtitles_api_key
         self._os_user_agent = opensubtitles_user_agent or "TMM-Lite"
+        self._assrt_token = assrt_token
         self._languages = [l.strip() for l in preferred_languages.split(",") if l.strip()]
         if not self._languages:
             self._languages = ["chi"]
 
         # Lazy-initialised
+        self._assrt: AssrtScraper | None = None
         self._os: OpenSubtitlesScraper | None = None
         self._subdl: SubDLScraper | None = None
 
@@ -74,7 +78,17 @@ class SubtitleDownloader:
         """
         lang_str = ",".join(self._languages[:3])  # max 3 languages per query
 
-        # Try OpenSubtitles first
+        # Try ASSRT first (Chinese-focused — best hit rate for zh subtitles)
+        if self._assrt_token:
+            try:
+                result = await self._search_assrt(title, year, lang_str)
+                if result is not None:
+                    return await self._save(result, media_folder, video_filename, connection)
+                logger.info("ASSRT: 无结果 %s (%s)", title, year)
+            except Exception:
+                logger.warning("ASSRT failed, trying OpenSubtitles", exc_info=True)
+
+        # Try OpenSubtitles
         if self._os_key:
             try:
                 result = await self._search_os(title, year, lang_str, imdb_id)
@@ -97,6 +111,9 @@ class SubtitleDownloader:
         return None
 
     async def aclose(self) -> None:
+        if self._assrt is not None:
+            await self._assrt.aclose()
+            self._assrt = None
         if self._os is not None:
             await self._os.aclose()
             self._os = None
@@ -120,6 +137,14 @@ class SubtitleDownloader:
                 return r
         return results[0] if results else None
 
+    async def _search_assrt(
+        self, title: str, year: int | None, languages: str,
+    ) -> SubtitleResult | None:
+        if self._assrt is None:
+            self._assrt = AssrtScraper(self._assrt_token)
+        results = await self._assrt.search(title, year, languages)
+        return results[0] if results else None
+
     async def _search_subdl(
         self, title: str, year: int | None, languages: str,
     ) -> SubtitleResult | None:
@@ -136,12 +161,17 @@ class SubtitleDownloader:
         connection: Connection | None = None,
     ) -> Path:
         """Download and save the subtitle file."""
-        if result.provider == "opensubtitles" and self._os is not None:
+        if result.provider == "opensubtitles":
+            if self._os is None:
+                self._os = OpenSubtitlesScraper(self._os_key, self._os_user_agent)
             data = await self._os.download(result)
-        elif self._subdl is not None:
-            data = await self._subdl.download(result.download_url)
-        else:
-            self._subdl = SubDLScraper()
+        elif result.provider == "assrt":
+            if self._assrt is None:
+                self._assrt = AssrtScraper(self._assrt_token)
+            data = await self._assrt.download(result)
+        else:  # subdl
+            if self._subdl is None:
+                self._subdl = SubDLScraper()
             data = await self._subdl.download(result.download_url)
 
         # Determine filename: prefer matching the video file stem
