@@ -14,6 +14,11 @@
         onsubmit="return confirm('将为所有非中文标题的已匹配条目下载字幕。确定？');">
     <button type="submit" {% if is_running %}disabled{% endif %}>🔄 一键刷新字幕（非中文标题）</button>
   </form>
+  <form method="post" action="/items/clear-missing" style="margin:0"
+        onsubmit="return confirm('将删除所有 missing 状态的条目（磁盘文件不动）。确定？');">
+    <button type="submit" {% if is_running %}disabled{% endif %}
+            style="background:#c0392b;">🗑 清除所有 missing</button>
+  </form>
 </div>
 
 {% if ignored_count %}

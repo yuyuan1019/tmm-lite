@@ -896,6 +896,30 @@ def create_app(
         return _redirect("/settings", ok="设置已保存")
 
     # ------------------------------------------------------------------
+    # POST /items/clear-missing
+    # ------------------------------------------------------------------
+
+    @app.post("/items/clear-missing")
+    async def items_clear_missing(request: Request) -> Any:
+        """Delete all items in 'missing' status."""
+        runner: ScanRunner = request.app.state.runner
+        if runner.is_running:
+            return _redirect("/items", err="任务正在运行中，暂不能清理")
+
+        sess = request.app.state.session_factory()
+        try:
+            result = sess.execute(
+                select(MediaItem).where(MediaItem.status == "missing")
+            ).scalars().all()
+            count = len(result)
+            for item in result:
+                sess.delete(item)
+            sess.commit()
+            return _redirect("/items", ok=f"已清除 {count} 条 missing 记录")
+        finally:
+            sess.close()
+
+    # ------------------------------------------------------------------
     # GET /preview — poster grid browse page
     # ------------------------------------------------------------------
 
