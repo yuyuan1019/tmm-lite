@@ -40,14 +40,15 @@ class OpenSubtitlesError(TmmError):
 class OpenSubtitlesScraper:
     """Async client for the OpenSubtitles.com REST API."""
 
-    def __init__(self, api_key: str) -> None:
+    def __init__(self, api_key: str, user_agent: str = "TMM-Lite") -> None:
         self._client = httpx.AsyncClient(
             base_url=BASE_URL,
             headers={
                 "Api-Key": api_key,
-                "User-Agent": "TMM-Lite/1.1",
+                "User-Agent": user_agent or "TMM-Lite",
             },
             timeout=httpx.Timeout(15.0),
+            follow_redirects=True,
         )
         self._last_request_time = 0.0
         self._min_interval = 3.0  # 20 req/min = 3s between
@@ -75,7 +76,8 @@ class OpenSubtitlesScraper:
         if year is not None:
             params["year"] = str(year)
         if imdb_id:
-            params["imdb_id"] = imdb_id
+            # REST API expects a bare numeric IMDb id (no "tt" prefix).
+            params["imdb_id"] = imdb_id.removeprefix("tt")
 
         try:
             resp = await self._client.get("/subtitles", params=params)

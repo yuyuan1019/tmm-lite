@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 
 from lxml import etree
@@ -132,3 +133,109 @@ def _write_nfo(folder: Path, media_type: str, meta: ScrapedMeta) -> Path:
         if tmp.exists():
             tmp.unlink()
         raise
+
+
+# ---------------------------------------------------------------------------
+# NFO reading — parse an existing Kodi NFO into a metadata dict
+# ---------------------------------------------------------------------------
+
+
+def parse_nfo(xml_bytes: bytes) -> dict[str, object] | None:
+    """Parse a Kodi ``movie.nfo`` / ``tvshow.nfo`` into a metadata dict.
+
+    The inverse of :func:`_build_nfo_bytes`: reads the fields the scanner
+    writes so a folder that already ships an NFO can be loaded without hitting
+    TMDB.  Tolerant of missing fields.  Returns ``None`` if the XML cannot be
+    parsed or contains no recognised fields.
+
+    Keys (all optional): ``title``, ``originaltitle``, ``year``, ``rating``,
+    ``plot``, ``genres`` (list[str]), ``tmdb_id``, ``imdb_id``.
+    """
+    try:
+        root = etree.fromstring(xml_bytes)
+    except Exception:  # noqa: BLE001 (unparseable NFO — leave item unchanged)
+        logger.debug("parse_nfo: failed to parse NFO XML (%d bytes)", len(xml_bytes))
+        return None
+
+    def _text(tag: str) -> str | None:
+        val = root.findtext(tag)
+        return val.strip() if val else None
+
+    meta: dict[str, object] = {}
+
+    title = _text("title")
+    if title:
+        meta["title"] = title
+    originaltitle = _text("originaltitle")
+    if originaltitle:
+        meta["originaltitle"] = originaltitle
+
+    year_raw = _text("year")
+    if year_raw:
+        # Year may be a range for collections (e.g. "2001-2011") — take the
+        # first 4-digit group.
+        m = re.search(r"\d{4}", year_raw)
+        if m:
+            meta["year"] = m.group(0)
+
+    rating = _parse_rating(root)
+    if rating is not None:
+        meta["rating"] = rating
+
+    plot = _text("plot")
+    if plot:
+        meta["plot"] = plot
+
+    genres = [g.text.strip() for g in root.findall("genre") if g.text and g.text.strip()]
+    if genres:
+        meta["genres"] = genres
+
+    tmdb_id, imdb_id = _parse_ids(root)
+    if tmdb_id:
+        meta["tmdb_id"] = tmdb_id
+    if imdb_id:
+        meta["imdb_id"] = imdb_id
+
+    return meta or None
+
+
+def _parse_rating(root: etree._Element) -> float | None:
+    """Extract a numeric rating from either ``<rating>`` or ``<ratings>``."""
+    el = root.find("rating")
+    if el is not None and el.text:
+        try:
+            return float(el.text.strip())
+        except ValueError:
+            pass
+    for r in root.findall("./ratings/rating"):
+        val = r.findtext("value")
+        if val:
+            try:
+                return float(val.strip())
+            except ValueError:
+                continue
+    return None
+
+
+def _parse_ids(root: etree._Element) -> tuple[str | None, str | None]:
+    """Extract TMDB / IMDb ids from ``<uniqueid>`` (and legacy ``<tmdbid>``)."""
+    tmdb_id: str | None = None
+    imdb_id: str | None = None
+    for uid in root.findall("uniqueid"):
+        if not uid.text:
+            continue
+        utype = (uid.get("type") or "").lower()
+        val = uid.text.strip()
+        if utype == "tmdb" and not tmdb_id:
+            tmdb_id = val
+        elif utype == "imdb" and not imdb_id:
+            imdb_id = val
+    if tmdb_id is None:
+        legacy = root.findtext("tmdbid")
+        if legacy:
+            tmdb_id = legacy.strip()
+    if imdb_id is None:
+        legacy = root.findtext("imdbid")
+        if legacy:
+            imdb_id = legacy.strip()
+    return tmdb_id, imdb_id

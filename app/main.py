@@ -128,6 +128,7 @@ def create_app(
             subtitle_dl = SubtitleDownloader(
                 opensubtitles_api_key=config.opensubtitles_api_key,
                 preferred_languages=config.subtitle_languages,
+                opensubtitles_user_agent=config.opensubtitles_user_agent,
             )
         runner.set_subtitle_downloader(subtitle_dl)
 

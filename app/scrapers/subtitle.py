@@ -45,8 +45,10 @@ class SubtitleDownloader:
         self,
         opensubtitles_api_key: str,
         preferred_languages: str = "chi,zho,zh",
+        opensubtitles_user_agent: str = "TMM-Lite",
     ) -> None:
         self._os_key = opensubtitles_api_key
+        self._os_user_agent = opensubtitles_user_agent or "TMM-Lite"
         self._languages = [l.strip() for l in preferred_languages.split(",") if l.strip()]
         if not self._languages:
             self._languages = ["chi"]
@@ -110,7 +112,7 @@ class SubtitleDownloader:
         self, title: str, year: int | None, languages: str, imdb_id: str | None,
     ) -> SubtitleResult | None:
         if self._os is None:
-            self._os = OpenSubtitlesScraper(self._os_key)
+            self._os = OpenSubtitlesScraper(self._os_key, self._os_user_agent)
         results = await self._os.search(title, year, languages, imdb_id)
         # Prefer non-HI (hearing impaired) results
         for r in results:

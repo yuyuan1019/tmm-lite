@@ -21,7 +21,7 @@ class SubDLScraper:
     """Async client for the SubDL API (no auth required)."""
 
     def __init__(self) -> None:
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(15.0))
+        self._client = httpx.AsyncClient(timeout=httpx.Timeout(15.0), follow_redirects=True)
         self._last_request_time = 0.0
         self._min_interval = 2.0
 

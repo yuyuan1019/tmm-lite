@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 
 from lxml import etree
 
-from app.nfo_writer import nfo_exists, write_movie_nfo, write_tvshow_nfo
+from app.nfo_writer import build_movie_nfo_bytes, nfo_exists, parse_nfo, write_movie_nfo, write_tvshow_nfo
 from app.scrapers.base import ScrapedMeta
 
 
@@ -222,3 +222,66 @@ def _text(element: etree._Element, tag: str) -> str | None:
     """Get text content of the first child with *tag*, or None."""
     child = element.find(tag)
     return child.text if child is not None else None
+
+
+# ---------------------------------------------------------------------------
+# NFO reading (parse_nfo)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_nfo_roundtrip() -> None:
+    """build_movie_nfo_bytes -> parse_nfo recovers the key fields."""
+    xml = build_movie_nfo_bytes(_make_meta())
+    parsed = parse_nfo(xml)
+    assert parsed is not None
+    assert parsed["title"] == "星际穿越"
+    assert parsed["originaltitle"] == "Interstellar"
+    assert parsed["year"] == "2014"
+    assert parsed["rating"] == 8.7
+    assert parsed["plot"] == "一部关于太空旅行的电影"
+    assert parsed["genres"] == ["科幻", "冒险"]
+    assert parsed["tmdb_id"] == "157336"
+
+
+def test_parse_nfo_real_world_with_imdb() -> None:
+    """Matches the Kodi NFO shape found in real libraries (uniqueid tmdb+imdb)."""
+    xml = (
+        "<movie>"
+        "<title>银翼杀手2049</title>"
+        "<originaltitle>Blade Runner 2049</originaltitle>"
+        "<year>2017</year><rating>7.6</rating>"
+        "<plot>三十年后……</plot>"
+        "<genre>科幻</genre><genre>剧情</genre>"
+        '<uniqueid type="tmdb" default="true">335984</uniqueid>'
+        '<uniqueid type="imdb">tt1856101</uniqueid>'
+        "</movie>"
+    ).encode("utf-8")
+    parsed = parse_nfo(xml)
+    assert parsed is not None
+    assert parsed["title"] == "银翼杀手2049"
+    assert parsed["originaltitle"] == "Blade Runner 2049"
+    assert parsed["year"] == "2017"
+    assert parsed["rating"] == 7.6
+    assert parsed["genres"] == ["科幻", "剧情"]
+    assert parsed["tmdb_id"] == "335984"
+    assert parsed["imdb_id"] == "tt1856101"
+
+
+def test_parse_nfo_ratings_structure() -> None:
+    """Newer <ratings><rating><value> form is parsed too."""
+    xml = (
+        '<movie><title>X</title>'
+        '<ratings><rating name="imdb" max="10" default="true"><value>8.1</value></rating></ratings>'
+        "</movie>"
+    ).encode("utf-8")
+    assert parse_nfo(xml) == {"title": "X", "rating": 8.1}
+
+
+def test_parse_nfo_tolerates_missing_and_garbage() -> None:
+    assert parse_nfo(b"<movie><title>Only</title></movie>") == {"title": "Only"}
+    # Year range (collections) -> first 4-digit group
+    assert parse_nfo(b"<movie><year>2001-2011</year></movie>")["year"] == "2001"
+    # Unparseable XML -> None
+    assert parse_nfo(b"not xml <<") is None
+    # No recognised fields -> None
+    assert parse_nfo(b"<movie></movie>") is None

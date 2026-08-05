@@ -32,7 +32,7 @@ from app.exceptions import (
     ScrapeError,
     TmdbAuthError,
 )
-from app.nfo_writer import build_movie_nfo_bytes, build_tvshow_nfo_bytes
+from app.nfo_writer import build_movie_nfo_bytes, build_tvshow_nfo_bytes, parse_nfo
 from app.parsers.filename_parser import ParsedName, parse_folder_name
 from app.scrapers.base import ScrapedMeta
 from app.scrapers.douban import DoubanScraper
@@ -280,6 +280,22 @@ async def _nfo_exists_async(conn: Connection, rel_folder: str, media_type: str) 
         return await conn.exists(nfo_rel)
     except OSError:
         return False
+
+
+async def _read_nfo_meta_async(
+    conn: Connection, rel_folder: str, media_type: str,
+) -> dict[str, object] | None:
+    """Read & parse the existing NFO for *rel_folder* via *conn*.
+
+    Returns the parsed metadata dict, or ``None`` if the NFO is missing or
+    cannot be parsed. Used to load a folder's bundled NFO without scraping.
+    """
+    nfo_rel = _nfo_rel(rel_folder, media_type)
+    try:
+        data = await conn.read_bytes(nfo_rel)
+    except Exception:  # noqa: BLE001 (best-effort; treat as "no usable meta")
+        return None
+    return parse_nfo(data)
 
 
 async def _find_video_file_async(conn: Connection, rel_folder: str) -> str | None:
@@ -742,15 +758,20 @@ class ScanRunner:
                     found = {p for p in found if p not in ignored}
 
                 nfo_map: dict[str, bool] = {}
+                nfo_meta_map: dict[str, dict[str, object] | None] = {}
                 for fpath in found:
                     rel = _relative_folder(fpath, lib_path)
-                    nfo_map[fpath] = await _nfo_exists_async(conn, rel, lib.media_type)
+                    has = await _nfo_exists_async(conn, rel, lib.media_type)
+                    nfo_map[fpath] = has
+                    if has:
+                        nfo_meta_map[fpath] = await _read_nfo_meta_async(conn, rel, lib.media_type)
 
                 with self._session_factory.begin() as sess:
                     for fpath in found:
                         _upsert_item(
                             sess, lib, fpath, self._config.overwrite_existing_nfo,
                             has_nfo=nfo_map.get(fpath, False),
+                            nfo_meta=nfo_meta_map.get(fpath),
                         )
 
                 # Mark missing for this library
@@ -913,11 +934,15 @@ class ScanRunner:
                         ignored = _ignored_paths(sess)
                     if ignored:
                         found = {p for p in found if p not in ignored}
-                    # Pre-compute NFO existence for discovered folders
+                    # Pre-compute NFO existence (+ parsed metadata) for discovered folders
                     nfo_map: dict[str, bool] = {}
+                    nfo_meta_map: dict[str, dict[str, object] | None] = {}
                     for fpath in found:
                         rel = _relative_folder(fpath, lib.path)
-                        nfo_map[fpath] = await _nfo_exists_async(conn, rel, lib.media_type)
+                        has = await _nfo_exists_async(conn, rel, lib.media_type)
+                        nfo_map[fpath] = has
+                        if has:
+                            nfo_meta_map[fpath] = await _read_nfo_meta_async(conn, rel, lib.media_type)
 
                     # Upsert discovered items
                     with self._session_factory.begin() as sess:
@@ -925,6 +950,7 @@ class ScanRunner:
                             _upsert_item(
                                 sess, lib, fpath, self._config.overwrite_existing_nfo,
                                 has_nfo=nfo_map.get(fpath, False),
+                                nfo_meta=nfo_meta_map.get(fpath),
                             )
 
                     fully_scanned.add(lib.id)
@@ -962,6 +988,7 @@ class ScanRunner:
                 if target is None:
                     continue
                 skip = False
+                nfo_meta: dict[str, object] | None = None
                 if (
                     not self._config.overwrite_existing_nfo
                     and target.status == "pending"
@@ -970,14 +997,19 @@ class ScanRunner:
                     try:
                         rel = _relative_folder(target.folder_path, target.library_path)
                         skip = await _nfo_exists_async(conn, rel, target.media_type)
+                        if skip:
+                            nfo_meta = await _read_nfo_meta_async(conn, rel, target.media_type)
                     finally:
                         await conn.aclose()
                 if skip:
                     with self._session_factory.begin() as sess:
                         item = sess.get(MediaItem, item_id)
                         if item is not None:
-                            item.status = "matched"
-                            item.error_message = None
+                            if nfo_meta:
+                                _apply_nfo_meta(item, nfo_meta, datetime.now(UTC))
+                            else:
+                                item.status = "matched"
+                                item.error_message = None
                     matched += 1
                 else:
                     api_queue_ids.append(item_id)
@@ -1608,6 +1640,40 @@ class ScanRunner:
 # ---------------------------------------------------------------------------
 
 
+def _apply_nfo_meta(item: MediaItem, meta: dict[str, object], now: datetime) -> None:
+    """Populate a MediaItem's matched-* fields from a parsed local NFO.
+
+    Marks the item ``matched`` with ``source="nfo"`` so it is never re-scraped
+    (the bundled NFO is treated as authoritative). Only call when an NFO exists.
+    """
+    if meta.get("title"):
+        item.matched_title = str(meta["title"])
+    if meta.get("originaltitle"):
+        item.matched_original_title = str(meta["originaltitle"])
+    if meta.get("year"):
+        try:
+            item.matched_year = int(str(meta["year"]))
+        except (ValueError, TypeError):
+            pass
+    if meta.get("rating") is not None:
+        try:
+            item.rating = float(meta["rating"])  # type: ignore[arg-type]
+        except (ValueError, TypeError):
+            pass
+    if meta.get("plot"):
+        item.overview = str(meta["plot"])
+    if meta.get("genres"):
+        item.genres = ",".join(str(g) for g in meta["genres"])  # type: ignore[arg-type]
+    if meta.get("tmdb_id"):
+        item.source_id = str(meta["tmdb_id"])
+    if meta.get("imdb_id"):
+        item.imdb_id = str(meta["imdb_id"])
+    item.source = "nfo"
+    item.status = "matched"
+    item.error_message = None
+    item.last_scraped_at = now
+
+
 def _upsert_item(
     sess: Session,
     lib: Library,
@@ -1615,10 +1681,13 @@ def _upsert_item(
     overwrite: bool,
     *,
     has_nfo: bool = False,
+    nfo_meta: dict[str, object] | None = None,
 ) -> MediaItem | None:
     """Insert or update a MediaItem for a discovered folder.
 
-    Follows the state-machine table (§9.1).
+    Follows the state-machine table (§9.1). When an existing NFO is present
+    and parseable, its metadata is loaded into the item (source="nfo") so the
+    folder is never sent to TMDB.
     """
     parsed: ParsedName = parse_folder_name(Path(folder_path).name)
 
@@ -1628,10 +1697,16 @@ def _upsert_item(
     ).scalar_one_or_none()
 
     if existing is not None:
-        return _update_existing(sess, existing, lib, parsed, overwrite, has_nfo=has_nfo)
+        return _update_existing(
+            sess, existing, lib, parsed, overwrite,
+            has_nfo=has_nfo, nfo_meta=nfo_meta,
+        )
 
     # New record
-    return _create_new(sess, lib, folder_path, parsed, overwrite, has_nfo=has_nfo)
+    return _create_new(
+        sess, lib, folder_path, parsed, overwrite,
+        has_nfo=has_nfo, nfo_meta=nfo_meta,
+    )
 
 
 def _create_new(
@@ -1642,6 +1717,7 @@ def _create_new(
     overwrite: bool,
     *,
     has_nfo: bool = False,
+    nfo_meta: dict[str, object] | None = None,
 ) -> MediaItem:
     """Create a new MediaItem from a newly discovered folder."""
     if has_nfo and not overwrite:
@@ -1661,6 +1737,10 @@ def _create_new(
         status=status,
     )
     sess.add(item)
+    # A folder that ships a parseable NFO is loaded from it directly and never
+    # scraped (the bundled NFO is authoritative).
+    if has_nfo and not overwrite and nfo_meta:
+        _apply_nfo_meta(item, nfo_meta, datetime.now(UTC))
     return item
 
 
@@ -1672,6 +1752,7 @@ def _update_existing(
     overwrite: bool,
     *,
     has_nfo: bool = False,
+    nfo_meta: dict[str, object] | None = None,
 ) -> MediaItem:
     """Update an existing MediaItem's parsed fields and status."""
     if item.status == "missing" or item.status == "manual_needed":
@@ -1712,6 +1793,13 @@ def _update_existing(
         item.library_id = lib.id
         item.parsed_title = parsed.title
         item.parsed_year = parsed.year
+
+    # If the folder ships a parseable NFO and we have no real metadata yet,
+    # load it now (covers new scans and previously-empty ExistingNfoMatched
+    # items). Items already scraped (matched_title set) are left untouched so
+    # their live metadata is never clobbered by an NFO re-read.
+    if has_nfo and not overwrite and nfo_meta and not item.matched_title:
+        _apply_nfo_meta(item, nfo_meta, datetime.now(UTC))
 
     return item
 
