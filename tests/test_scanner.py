@@ -853,6 +853,13 @@ def test_normalize_path_strips_trailing() -> None:
     assert not result.endswith("/")
 
 
+def test_normalize_path_keeps_posix_absolute() -> None:
+    # Remote (SSH/WebDAV) paths must stay POSIX-absolute — on Windows they
+    # must NOT be rewritten onto the current drive (e.g. D:/Download/...).
+    result = normalize_path("/Download/ys_video")
+    assert result == "/Download/ys_video"
+
+
 # ---------------------------------------------------------------------------
 # rescrape_item with NFO present (M7-T12 variation)
 # ---------------------------------------------------------------------------

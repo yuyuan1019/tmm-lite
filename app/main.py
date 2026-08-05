@@ -23,7 +23,7 @@ from sqlalchemy import func, select
 
 from app import VIDEO_EXTENSIONS, get_data_dir
 from app.config import AppConfig, load_config, save_config, validate_cron
-from app.crypto import load_or_create_key
+from app.crypto import decrypt_dict, load_or_create_key
 from app.database import (
     AppMeta,
     Library,
@@ -315,11 +315,48 @@ def create_app(
                     "item_count": count,
                 })
 
+            # Build a list of reusable remote connections (deduped by
+            # type+host+port+user) so the add form can offer "select an
+            # existing connection". Passwords are NEVER sent to the browser;
+            # browse/test resolve credentials server-side by library id.
+            saved_connections: list[dict[str, object]] = []
+            seen: set[tuple[str, str, int, str]] = set()
+            enc_key = request.app.state.enc_key
+            for lib in libs:
+                ct = lib.connection_type or "local"
+                if ct == "local" or not lib.connection_config_encrypted:
+                    continue
+                try:
+                    cfg = decrypt_dict(lib.connection_config_encrypted, enc_key)
+                except Exception:  # noqa: BLE001
+                    continue
+                host = str(cfg.get("host", "")).strip()
+                username = str(cfg.get("username", "")).strip()
+                try:
+                    port_i = int(cfg.get("port") or 0)
+                except (TypeError, ValueError):
+                    port_i = 0
+                if not host:
+                    continue
+                dedup = (ct, host.lower(), port_i, username.lower())
+                if dedup in seen:
+                    continue
+                seen.add(dedup)
+                port_part = f":{port_i}" if port_i else ""
+                saved_connections.append(
+                    {
+                        "lib_id": lib.id,
+                        "type": ct,
+                        "label": f"{username or '?'}@{host}{port_part}",
+                    }
+                )
+
             return _render(
                 "libraries.html",
                 {
                     "request": request,
                     "libraries": lib_data,
+                    "saved_connections": saved_connections,
                     "is_running": request.app.state.runner.is_running,
                     "ok": unquote(request.query_params.get("ok", "")),
                     "err": unquote(request.query_params.get("err", "")),
@@ -343,10 +380,11 @@ def create_app(
         conn_port: str = Form(""),
         conn_username: str = Form(""),
         conn_password: str = Form(""),
+        source_lib_id: str = Form(""),
     ) -> Any:
-        runner: ScanRunner = request.app.state.runner
-        if runner.is_running:
-            return _redirect("/libraries", err="任务正在运行中，暂不能修改媒体库")
+        # Adding a library is just a DB row insert; allow it even while a
+        # scan runs (the new library is picked up on the next scan/rescan).
+        # Only re-scan itself is mutually exclusive.
 
         # Validate
         if not name.strip():
@@ -370,23 +408,39 @@ def create_app(
             if existing is not None:
                 return _redirect("/libraries", err="该路径已存在")
 
-            # Encrypt connection config if not local
+            # Connection config: either reuse an existing library's
+            # connection (copy its encrypted config verbatim so the new
+            # library is self-contained) or encrypt freshly typed creds.
             enc_config: str | None = None
             if connection_type != "local":
-                import json
+                if source_lib_id.strip():
+                    try:
+                        src = sess.get(Library, int(source_lib_id.strip()))
+                    except (TypeError, ValueError):
+                        src = None
+                    if (
+                        src is None
+                        or src.connection_type == "local"
+                        or not src.connection_config_encrypted
+                    ):
+                        return _redirect("/libraries", err="所选连接不可用，请重新选择")
+                    connection_type = src.connection_type
+                    enc_config = src.connection_config_encrypted
+                else:
+                    import json
 
-                from app.crypto import encrypt_str
-                try:
-                    port = int(conn_port) if conn_port.strip() else (22 if connection_type == "ssh" else 443)
-                except ValueError:
-                    return _redirect("/libraries", err="端口必须是数字")
-                cfg = {
-                    "host": conn_host.strip(),
-                    "port": port,
-                    "username": conn_username.strip(),
-                    "password": conn_password,
-                }
-                enc_config = encrypt_str(json.dumps(cfg), request.app.state.enc_key)
+                    from app.crypto import encrypt_str
+                    try:
+                        port = int(conn_port) if conn_port.strip() else (22 if connection_type == "ssh" else 443)
+                    except ValueError:
+                        return _redirect("/libraries", err="端口必须是数字")
+                    cfg = {
+                        "host": conn_host.strip(),
+                        "port": port,
+                        "username": conn_username.strip(),
+                        "password": conn_password,
+                    }
+                    enc_config = encrypt_str(json.dumps(cfg), request.app.state.enc_key)
 
             lib = Library(
                 name=name.strip(),
@@ -436,9 +490,10 @@ def create_app(
 
     @app.post("/libraries/{lib_id}/delete")
     async def libraries_delete(request: Request, lib_id: int) -> Any:
-        runner: ScanRunner = request.app.state.runner
-        if runner.is_running:
-            return _redirect("/libraries", err="任务正在运行中，暂不能修改媒体库")
+        # Deleting a library is allowed while a scan runs. If the deleted
+        # library happens to be the one currently being scanned, per-item
+        # inserts may log FK errors, but the scan's try/finally still
+        # releases the run lock — no crash, no stuck state.
 
         sess = request.app.state.session_factory()
         try:
@@ -1155,6 +1210,7 @@ def create_app(
         port: str = "",
         username: str = "",
         password: str = "",
+        connection_id: str = "",
     ) -> Any:
         """Return a JSON list of subdirectories at *path*.
 
@@ -1168,6 +1224,38 @@ def create_app(
         For remote connections, a temporary connection is created to browse.
         """
         from app.connection import ConnectionConfig, create_connection
+
+        # Reuse an existing library's connection: resolve its (decrypted)
+        # credentials server-side so the password never reaches the browser.
+        if connection_id:
+            sess = request.app.state.session_factory()
+            try:
+                try:
+                    src = sess.get(Library, int(connection_id))
+                except (TypeError, ValueError):
+                    src = None
+            finally:
+                sess.close()
+            if (
+                src is None
+                or src.connection_type == "local"
+                or not src.connection_config_encrypted
+            ):
+                return JSONResponse(
+                    {"error": "所选连接不可用（可能已被删除）", "items": []},
+                    status_code=400,
+                )
+            try:
+                cfg = decrypt_dict(src.connection_config_encrypted, request.app.state.enc_key)
+            except Exception:  # noqa: BLE001
+                return JSONResponse(
+                    {"error": "连接凭据解密失败", "items": []}, status_code=500
+                )
+            connection_type = src.connection_type
+            host = str(cfg.get("host", ""))
+            port = str(cfg.get("port") or "")
+            username = str(cfg.get("username", ""))
+            password = str(cfg.get("password") or "")
 
         try:
             if connection_type == "local":
@@ -1264,8 +1352,9 @@ def create_app(
                     except Exception as exc:  # noqa: BLE001 (browse is best-effort)
                         logger.debug("Browse is_dir failed for %s: %s", full, exc)
                 dirs_only.sort(key=lambda d: d["name"].lower())
-                parent_path = str(PurePosixPath(path).parent)
-                parent = parent_path if parent_path and parent_path != "/" else None
+                # Allow navigating back up to root "/"; only hide "parent"
+                # when we are already at the root (matches the local branch).
+                parent = None if path == "/" else str(PurePosixPath(path).parent)
                 return {"items": dirs_only, "parent": parent, "current": path}
             finally:
                 await conn.aclose()

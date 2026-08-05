@@ -3,7 +3,7 @@
 <h1>媒体库管理</h1>
 
 {% if is_running %}
-<p class="notice">任务运行中，暂不能修改媒体库。</p>
+<p class="notice">任务运行中：重新扫描暂不可用，添加 / 删除媒体库仍可操作。</p>
 {% endif %}
 
 <table>
@@ -25,7 +25,7 @@
               style="background:#2980b9;" title="重新发现此库下的所有文件夹">🔄 重新扫描</button>
     </form>
     <form method="post" action="/libraries/{{ lib.id }}/delete" style="display:inline">
-      <button type="submit" {% if is_running %}disabled{% endif %}>删除</button>
+      <button type="submit">删除</button>
     </form>
   </td>
 </tr>
@@ -60,21 +60,35 @@
   </label>
 
   <div id="conn_fields" style="display:none">
-    <label>主机：<input name="conn_host" id="conn_host" placeholder="192.168.1.100"></label>
-    <label>端口：<input name="conn_port" id="conn_port" type="number" placeholder="22"></label>
-    <label>用户名：<input name="conn_username" id="conn_username"></label>
-    <label>密码：<input name="conn_password" id="conn_password" type="password"></label>
-    <div style="margin:8px 0;">
-      <button type="button" id="test_btn" onclick="testConnection()" style="background:#2980b9;">🔌 测试连接</button>
-      <span id="test_status" style="margin-left:8px; font-size:13px;"></span>
+    {% if saved_connections %}
+    <label>选择已有连接：
+      <select id="saved_conn" onchange="onSavedConnChange()">
+        <option value="">➕ 新建连接（手动填写下方信息）</option>
+        {% for c in saved_connections %}
+        <option value="{{ c.lib_id }}" data-type="{{ c.type }}">{{ c.label }}（{{ c.type }}）</option>
+        {% endfor %}
+      </select>
+    </label>
+    {% endif %}
+    <input type="hidden" name="source_lib_id" id="source_lib_id" value="">
+    <div id="saved_conn_badge" style="display:none; margin:4px 0 8px; padding:6px 10px; background:#eafaf1; border:1px solid #27ae60; border-radius:4px; font-size:13px;"></div>
+    <div id="conn_manual_fields">
+      <label>主机：<input name="conn_host" id="conn_host" placeholder="192.168.1.100"></label>
+      <label>端口：<input name="conn_port" id="conn_port" type="number" placeholder="22"></label>
+      <label>用户名：<input name="conn_username" id="conn_username"></label>
+      <label>密码：<input name="conn_password" id="conn_password" type="password"></label>
+      <div style="margin:8px 0;">
+        <button type="button" id="test_btn" onclick="testConnection()" style="background:#2980b9;">🔌 测试连接</button>
+        <span id="test_status" style="margin-left:8px; font-size:13px;"></span>
+      </div>
     </div>
-    <div id="remote_browse_area" style="display:none;">
+    <div id="remote_browse_area" style="display:none; margin:10px 0;">
       <button type="button" onclick="openBrowser()" style="background:#27ae60;">📂 选择远程文件夹</button>
-      <span style="font-size:12px; color:#888;">连接成功后可选</span>
+      <span style="font-size:12px; color:#888; margin-left:8px;">连接成功后可选</span>
     </div>
   </div>
 
-  <button type="submit" {% if is_running %}disabled{% endif %}>添加</button>
+  <button type="submit" style="margin-top:6px;">添加</button>
 </form>
 
 <!-- Folder browser modal -->
@@ -120,6 +134,15 @@ function onConnChange() {
     remoteVerified = false;
     document.getElementById('test_status').textContent = '';
     remoteBrowse.style.display = 'none';
+    // Leaving remote mode: drop any reused-connection selection
+    var sc = document.getElementById('saved_conn');
+    if (sc) sc.value = '';
+    var si = document.getElementById('source_lib_id');
+    if (si) si.value = '';
+    var badge = document.getElementById('saved_conn_badge');
+    if (badge) badge.style.display = 'none';
+    var manual = document.getElementById('conn_manual_fields');
+    if (manual) manual.style.display = 'block';
   } else {
     connDiv.style.display = 'block';
     browseArea.style.display = 'none';
@@ -127,6 +150,55 @@ function onConnChange() {
       remoteBrowse.style.display = 'none';
     }
   }
+}
+
+function onSavedConnChange() {
+  var sel = document.getElementById('saved_conn');
+  var badge = document.getElementById('saved_conn_badge');
+  var manual = document.getElementById('conn_manual_fields');
+  var srcInput = document.getElementById('source_lib_id');
+  var id = sel ? sel.value : '';
+  var opt = sel ? sel.options[sel.selectedIndex] : null;
+
+  if (id && opt) {
+    srcInput.value = id;
+    // Keep connection_type in sync with the reused connection's type
+    var type = opt.getAttribute('data-type') || 'ssh';
+    document.getElementById('connection_type').value = type;
+    manual.style.display = 'none';
+    badge.style.display = 'block';
+    badge.innerHTML = '✓ 复用已有连接：<b>' + opt.text + '</b>';
+    // Known-good connection: allow browsing without re-testing
+    remoteVerified = true;
+    document.getElementById('remote_browse_area').style.display = 'block';
+    document.getElementById('test_status').textContent = '';
+  } else {
+    srcInput.value = '';
+    manual.style.display = 'block';
+    badge.style.display = 'none';
+    remoteVerified = false;
+    document.getElementById('remote_browse_area').style.display = 'none';
+    document.getElementById('test_status').textContent = '';
+  }
+}
+
+// Build /api/browse query params. When a saved connection is selected,
+// credentials are resolved server-side by connection_id (password never
+// sent to the browser); otherwise use the manually typed host/port/user/pass.
+function currentConnParams() {
+  var ct = document.getElementById('connection_type').value;
+  var srcId = document.getElementById('source_lib_id').value;
+  if (srcId) {
+    return 'connection_type=' + encodeURIComponent(ct) + '&connection_id=' + encodeURIComponent(srcId);
+  }
+  var p = 'connection_type=' + encodeURIComponent(ct);
+  if (ct !== 'local') {
+    p += '&host=' + encodeURIComponent(document.getElementById('conn_host').value);
+    p += '&port=' + encodeURIComponent(document.getElementById('conn_port').value);
+    p += '&username=' + encodeURIComponent(document.getElementById('conn_username').value);
+    p += '&password=' + encodeURIComponent(document.getElementById('conn_password').value);
+  }
+  return p;
 }
 
 function openBrowser() {
@@ -145,26 +217,17 @@ function closeBrowser() {
 }
 
 function testConnection() {
-  var ct = document.getElementById('connection_type').value;
+  var srcId = document.getElementById('source_lib_id').value;
   var host = document.getElementById('conn_host').value.trim();
-  var port = document.getElementById('conn_port').value.trim();
-  var user = document.getElementById('conn_username').value.trim();
-  var pass = document.getElementById('conn_password').value;
 
-  if (!host) {
+  if (!srcId && !host) {
     document.getElementById('test_status').innerHTML = '<span style="color:red;">请输入主机地址</span>';
     return;
   }
 
   document.getElementById('test_status').innerHTML = '<span style="color:#2980b9;">连接中...</span>';
 
-  var params = 'path=/&connection_type=' + ct
-    + '&host=' + encodeURIComponent(host)
-    + '&port=' + encodeURIComponent(port)
-    + '&username=' + encodeURIComponent(user)
-    + '&password=' + encodeURIComponent(pass);
-
-  fetch('/api/browse?' + params)
+  fetch('/api/browse?path=/&' + currentConnParams())
     .then(function(r) { return r.json(); })
     .then(function(data) {
       if (data.error) {
@@ -190,14 +253,7 @@ function loadBrowse(path) {
   document.getElementById('browser_items').innerHTML = '<p>加载中...</p>';
   document.getElementById('browser_error').style.display = 'none';
 
-  var ct = document.getElementById('connection_type').value;
-  var params = 'path=' + encodeURIComponent(path) + '&connection_type=' + ct;
-  if (ct !== 'local') {
-    params += '&host=' + encodeURIComponent(document.getElementById('conn_host').value);
-    params += '&port=' + encodeURIComponent(document.getElementById('conn_port').value);
-    params += '&username=' + encodeURIComponent(document.getElementById('conn_username').value);
-    params += '&password=' + encodeURIComponent(document.getElementById('conn_password').value);
-  }
+  var params = 'path=' + encodeURIComponent(path) + '&' + currentConnParams();
 
   fetch('/api/browse?' + params)
     .then(function(r) { return r.json(); })

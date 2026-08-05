@@ -129,8 +129,16 @@ def normalize_path(path: str) -> str:
     """Normalise a path to an absolute POSIX string.
 
     Uses ``os.path.normpath`` — does **not** resolve symlinks.
+
+    Deliberately avoids ``os.path.abspath``: on Windows it rewrites a
+    POSIX-absolute path (e.g. a *remote* SSH/WebDAV ``/Download/movies``)
+    onto the current drive (``D:\\Download\\movies``), corrupting remote
+    library paths.  All callers pass absolute paths (library paths are
+    validated to start with ``/``; folder paths are built from
+    ``PurePosixPath(lib.path) / rel``), so plain ``normpath`` is enough and
+    keeps remote paths intact.
     """
-    norm = os.path.normpath(os.path.abspath(path))
+    norm = os.path.normpath(path)
     return norm.replace("\\", "/")
 
 
