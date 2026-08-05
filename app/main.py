@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy import func, select
 
-from app import get_data_dir
+from app import VIDEO_EXTENSIONS, get_data_dir
 from app.config import AppConfig, load_config, save_config, validate_cron
 from app.crypto import load_or_create_key
 from app.database import (
@@ -966,7 +966,34 @@ def create_app(
                 return HTMLResponse("<h2>该条目尚未刮削完成</h2>", status_code=400)
 
             title = item.matched_title or item.parsed_title or "Unknown"
-            return HTMLResponse(_play_page_html(item_id, title))
+
+            # Quick probe to get file info for the play page
+            lib = sess.get(Library, item.library_id)
+            file_info: dict[str, object] = {}
+            if lib is not None:
+                conn = _library_connection(lib, request.app.state.enc_key)
+                try:
+                    from app.scanner import _find_video_file_async, _relative_folder
+                    rel = _relative_folder(item.folder_path, lib.path)
+                    if Path(rel).suffix.lower() in VIDEO_EXTENSIONS:
+                        video_rel = rel
+                    else:
+                        video_rel = await _find_video_file_async(conn, rel)
+                        if video_rel is None:
+                            video_rel = await _find_video_deep(conn, rel)
+                    if video_rel is not None:
+                        file_info = {
+                            "found": True,
+                            "ext": Path(video_rel).suffix.lower(),
+                            "size": await conn.file_size(video_rel),
+                            "filename": Path(video_rel).name,
+                        }
+                except Exception:
+                    pass
+                finally:
+                    await conn.aclose()
+
+            return HTMLResponse(_play_page_html(item_id, title, file_info))
         finally:
             sess.close()
 
@@ -1287,9 +1314,41 @@ def _format_time(dt: datetime | None) -> str:
     return _filter_localtime(dt)
 
 
-def _play_page_html(item_id: int, title: str) -> str:
-    """Return an HTML5 video player page for *item_id* with MKV/MP4 fallback."""
+def _play_page_html(item_id: int, title: str, file_info: dict[str, object] | None = None) -> str:
+    """Return an HTML5 video player page for *item_id* with codec guidance."""
     stream_url = f"/api/stream/{item_id}"
+
+    # Determine browser compatibility
+    ext = str(file_info.get("ext", "")) if file_info else ""
+    fname = str(file_info.get("filename", "")) if file_info else ""
+    fsize_mb = ""
+    if file_info and file_info.get("size"):
+        try:
+            fsize_mb = f"{(int(file_info['size']) / 1048576):.1f} MB"
+        except (ValueError, TypeError):
+            pass
+
+    browser_ok = ext in (".mp4", ".webm", ".mov")
+    format_label = ext.upper().lstrip(".") if ext else "?"
+    format_note = ""
+    if ext == ".mkv":
+        format_note = "MKV 容器通常含 HEVC/DTS 编码，浏览器无法解码"
+    elif ext == ".m2ts":
+        format_note = "M2TS 蓝光原盘格式，浏览器不支持"
+    elif ext == ".ts":
+        format_note = "TS 流格式，浏览器兼容性差"
+    elif ext == ".avi":
+        format_note = "AVI 容器较旧，浏览器可能无法播放"
+
+    file_info_html = ""
+    if file_info and file_info.get("found"):
+        file_info_html = f"""
+<div style="background:#1a1a2e;border-radius:8px;padding:12px 16px;margin-bottom:16px;font-size:13px;line-height:1.8;">
+  <div>📁 <b>{fname}</b></div>
+  <div style="color:#888;">格式: {format_label} | 大小: {fsize_mb}</div>
+  <div style="color:#e67e22;margin-top:4px;">{format_note}</div>
+</div>"""
+
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1302,12 +1361,12 @@ body {{ background:#0a0a0a; color:#ccc; font-family:-apple-system,sans-serif; di
 .header {{ padding:10px 16px; background:#1a1a1a; display:flex; align-items:center; gap:12px; flex-shrink:0; }}
 .header a {{ color:#3498db; text-decoration:none; font-size:14px; }}
 .header h2 {{ font-size:16px; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
-.player-wrap {{ flex:1; display:flex; align-items:center; justify-content:center; position:relative; min-height:0; }}
-video {{ max-width:100%; max-height:100%; width:100%; height:100%; background:#000; }}
+.player-wrap {{ flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; position:relative; min-height:0; padding:20px; }}
+video {{ max-width:100%; max-height:60vh; background:#000; border-radius:4px; }}
 .loading {{ display:none; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); text-align:center; z-index:10; }}
 .spinner {{ width:40px; height:40px; border:3px solid #333; border-top-color:#3498db; border-radius:50%; animation:spin 0.8s linear infinite; margin:0 auto 12px; }}
 @keyframes spin {{ to {{ transform:rotate(360deg); }} }}
-.fallback {{ display:none; padding:20px; text-align:center; max-width:500px; margin:0 auto; }}
+.fallback {{ padding:20px; text-align:center; max-width:500px; }}
 .fallback code {{ display:block; margin:12px auto; padding:10px; background:#1a1a1a; border-radius:6px; word-break:break-all; font-size:13px; }}
 .fallback button {{ margin:6px; padding:10px 20px; border:none; border-radius:6px; cursor:pointer; font-size:14px; }}
 .btn-copy {{ background:#2c3e50; color:#fff; }}
@@ -1322,6 +1381,7 @@ video {{ max-width:100%; max-height:100%; width:100%; height:100%; background:#0
   <span id="status" style="font-size:12px;color:#888;"></span>
 </div>
 <div class="player-wrap" id="playerWrap">
+  {file_info_html}
   <div id="loading" class="loading" style="display:flex;flex-direction:column;align-items:center;">
     <div class="spinner"></div><div>正在检测视频流…</div>
   </div>
@@ -1335,17 +1395,18 @@ video {{ max-width:100%; max-height:100%; width:100%; height:100%; background:#0
     <source src="{stream_url}" onerror="onSourceError()">
   </video>
   <div id="fallback" class="fallback">
-    <h3 style="color:#e74c3c;margin-bottom:12px;">⚠ 无法播放此视频</h3>
-    <p style="margin-bottom:4px;color:#f99;" id="fallbackReason"></p>
-    <p style="margin-bottom:12px;">可能原因：视频格式不被浏览器支持、编码不兼容、或文件未找到。</p>
-    <p style="margin-bottom:16px;">请使用外部播放器打开：</p>
+    <h3 style="color:#e74c3c;margin-bottom:8px;">⚠ 浏览器无法播放此视频</h3>
+    <p style="color:#f99;font-size:13px;margin-bottom:4px;" id="fallbackReason"></p>
+    <p style="font-size:13px;color:#e67e22;margin-bottom:12px;">{format_note}</p>
+    <p style="margin-bottom:4px;font-weight:600;">请使用 PotPlayer 或 VLC 播放：</p>
     <code id="streamUrl">{stream_url}</code>
     <button class="btn-copy" onclick="copyStreamUrl()">📋 复制流地址</button>
-    <button class="btn-pot" onclick="potPlayer()">🎬 在 PotPlayer 中打开</button>
+    <button class="btn-pot" onclick="potPlayer()">🎬 一键复制到 PotPlayer</button>
     <a href="/preview"><button class="btn-back">← 返回影视库</button></a>
-    <p style="margin-top:16px;font-size:12px;color:#888;">
-      PotPlayer: Ctrl+U → 粘贴地址<br>
-      VLC: 媒体 → 打开网络串流 → 粘贴地址
+    <p style="margin-top:16px;font-size:12px;color:#888;line-height:1.6;">
+      <b>PotPlayer 步骤：</b>打开 PotPlayer → 按 Ctrl+U → 粘贴地址 → 确定<br>
+      <b>VLC 步骤：</b>媒体 → 打开网络串流 → 粘贴地址 → 播放<br>
+      <b>为什么浏览器不能播？</b>REMUX/蓝光文件使用 HEVC 10bit HDR + DTS-HD/TrueHD 音轨，这些编码浏览器不支持硬解。PotPlayer/VLC 内置了完整的解码器。
     </p>
   </div>
 </div>
@@ -1354,25 +1415,24 @@ var streamUrl = '{stream_url}';
 var fullUrl = window.location.origin + streamUrl;
 var _probeDone = false;
 var _loadTimer = null;
+var _browserOk = {'true' if browser_ok else 'false'};
 
 document.getElementById('streamUrl').textContent = fullUrl;
 
-// Probe: request just the first byte via Range to verify the stream works.
-// If it returns 206, the stream is valid.  If 404/error, show fallback.
-fetch(fullUrl, {{ headers: {{ 'Range': 'bytes=0-0' }} }}).then(function(r) {{
-  if (r.status === 206) {{
-    startPlayer(); return;
-  }}
-  if (r.status >= 400) {{
+// Show fallback immediately for known-unsupported formats
+if (!_browserOk) {{
+  document.getElementById('loading').style.display = 'none';
+  document.getElementById('fallback').style.display = 'block';
+  document.getElementById('fallbackReason').textContent = '{format_label} 格式 — 推荐使用外部播放器';
+  document.getElementById('status').textContent = '需外部播放器';
+}} else {{
+  // Probe: first byte range request to verify the stream
+  fetch(fullUrl, {{ headers: {{ 'Range': 'bytes=0-0' }} }}).then(function(r) {{
+    if (r.status === 206) {{ startPlayer(); return; }}
     r.json().then(function(j) {{ showFallback(j.error || 'HTTP ' + r.status); }})
      .catch(function() {{ showFallback('服务器返回 HTTP ' + r.status); }});
-    return;
-  }}
-  // Unexpected success without range — try anyway
-  startPlayer();
-}}).catch(function(e) {{
-  showFallback('无法连接视频流: ' + e.message);
-}});
+  }}).catch(function(e) {{ showFallback('无法连接: ' + e.message); }});
+}}
 
 function startPlayer() {{
   if (_probeDone) return;
@@ -1382,11 +1442,8 @@ function startPlayer() {{
   var v = document.getElementById('player');
   v.style.display = 'block';
   v.load();
-  // Safety timeout: if video doesn't start within 15s, show fallback
   _loadTimer = setTimeout(function() {{
-    if (v.readyState < 2) {{
-      showFallback('加载超时 — 视频可能过大或编码不兼容');
-    }}
+    if (v.readyState < 2) showFallback('加载超时 — 编码可能不兼容，请用 PotPlayer');
   }}, 15000);
 }}
 
@@ -1414,27 +1471,23 @@ function onLoaded() {{
 function onError() {{
   var v = document.getElementById('player');
   var msg = v.error ? v.error.message : '未知错误';
-  showFallback('视频解码失败: ' + msg);
+  showFallback('解码失败: ' + msg + ' — 请用 PotPlayer 播放');
 }}
 
-function onSourceError() {{
-  showFallback('视频源加载失败 — 格式不支持或文件不存在');
-}}
+function onSourceError() {{ showFallback('视频源加载失败 — 格式不支持'); }}
 
 function copyStreamUrl() {{
   if (navigator.clipboard) {{
     navigator.clipboard.writeText(fullUrl).then(function() {{
-      alert('流地址已复制！\\n\\n在 PotPlayer 中 Ctrl+U 粘贴。');
+      alert('流地址已复制！\\n\\n打开 PotPlayer (Ctrl+U) 或 VLC (Ctrl+N) 粘贴即可播放。');
     }});
-  }} else {{
-    prompt('请复制以下地址：', fullUrl);
-  }}
+  }} else {{ prompt('请复制：', fullUrl); }}
 }}
 
 function potPlayer() {{
   if (navigator.clipboard) {{
     navigator.clipboard.writeText(fullUrl).then(function() {{
-      alert('流地址已复制！\\n\\n请打开 PotPlayer，按 Ctrl+U 粘贴，点击确定即可播放。');
+      alert('流地址已复制！\\n\\n请打开 PotPlayer → 按 Ctrl+U → 粘贴 → 确定');
     }});
   }}
 }}
