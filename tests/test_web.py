@@ -394,12 +394,20 @@ def test_settings_save_and_reload(client: TestClient) -> None:
         "douban_delay_seconds": "3.0",
         "overwrite_existing_nfo": "on",
         "schedule_cron": "0 6 * * *",
+        "subtitle_enabled": "on",
+        "opensubtitles_api_key": "os-key",
+        "subdl_api_key": "subdl-key",
+        "subtitle_languages": "zh-cn",
     }, follow_redirects=False)
     assert resp.status_code == 303
+    assert client.app.state.config.subdl_api_key == "subdl-key"
+    assert client.app.state.config.subtitle_languages == "zh-cn"
 
     # Verify page shows the new values
     resp = client.get("/settings")
     assert resp.status_code == 200
+    assert 'name="opensubtitles_user_agent"' not in resp.text
+    assert "无需手动填写" in resp.text
 
 
 def test_settings_invalid_cron_rejected(client: TestClient) -> None:

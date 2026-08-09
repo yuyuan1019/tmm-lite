@@ -1,9 +1,7 @@
 """OpenSubtitles.com API scraper for subtitle download.
 
-Uses the REST API v1.  Requires a free API key from opensubtitles.com.
+Uses the REST API v1. Requires a free API key from opensubtitles.com.
 Rate limit: 20 requests/minute on the free tier.
-
-ISO 639-2 language codes used: chi (Chinese), zho (Chinese), eng (English), etc.
 """
 
 from __future__ import annotations
@@ -19,6 +17,11 @@ from app.exceptions import TmmError
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.opensubtitles.com/api/v1"
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/138.0.0.0 Safari/537.36"
+)
 
 
 @dataclass
@@ -40,15 +43,29 @@ class OpenSubtitlesError(TmmError):
 class OpenSubtitlesScraper:
     """Async client for the OpenSubtitles.com REST API."""
 
-    def __init__(self, api_key: str, user_agent: str = "TMM-Lite") -> None:
+    def __init__(
+        self,
+        api_key: str,
+        user_agent: str = DEFAULT_USER_AGENT,
+        proxy: str = "",
+    ) -> None:
+        self._proxy = proxy
         self._client = httpx.AsyncClient(
             base_url=BASE_URL,
             headers={
                 "Api-Key": api_key,
-                "User-Agent": user_agent or "TMM-Lite",
+                "User-Agent": user_agent or DEFAULT_USER_AGENT,
+                "Accept": "application/json",
             },
             timeout=httpx.Timeout(15.0),
             follow_redirects=True,
+            proxy=proxy or None,
+        )
+        # Do not leak the API key to the temporary cross-origin download URL.
+        self._download_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0),
+            follow_redirects=True,
+            proxy=proxy or None,
         )
         self._last_request_time = 0.0
         self._min_interval = 3.0  # 20 req/min = 3s between
@@ -69,23 +86,27 @@ class OpenSubtitlesScraper:
             imdb_id: IMDb ID (e.g. ``tt0816692``) for exact match.
         """
         await self._rate_limit()
-        params: dict[str, str] = {
-            "query": title,
-            "languages": language,
-        }
-        if year is not None:
-            params["year"] = str(year)
+        params: dict[str, str] = {"languages": language}
         if imdb_id:
             # REST API expects a bare numeric IMDb id (no "tt" prefix).
             params["imdb_id"] = imdb_id.removeprefix("tt")
+        else:
+            params["query"] = title
+            if year is not None:
+                params["year"] = str(year)
 
         try:
             resp = await self._client.get("/subtitles", params=params)
             resp.raise_for_status()
             data = resp.json()
-        except Exception as exc:  # noqa: BLE001 (API failures must not crash)
-            logger.warning("OpenSubtitles search failed: %s", exc)
-            return []
+        except httpx.HTTPStatusError as exc:
+            raise OpenSubtitlesError(
+                f"OpenSubtitles 搜索失败: HTTP {exc.response.status_code}"
+            ) from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            raise OpenSubtitlesError(
+                f"OpenSubtitles 搜索失败: {type(exc).__name__}"
+            ) from exc
 
         results: list[SubtitleResult] = []
         for item in data.get("data", []):
@@ -100,8 +121,9 @@ class OpenSubtitlesScraper:
             results.append(SubtitleResult(
                 provider="opensubtitles",
                 language=attrs.get("language", language),
-                filename=attrs.get("release", title),
-                download_url=f"/download/{fid}",
+                filename=files[0].get("file_name") or attrs.get("release") or title,
+                # The download endpoint expects file_id in a JSON request body.
+                download_url=str(fid),
                 score=float(attrs.get("ratings", 0) or 0),
                 hearing_impaired=bool(attrs.get("hearing_impaired", False)),
             ))
@@ -115,8 +137,8 @@ class OpenSubtitlesScraper:
         await self._rate_limit()
         try:
             resp = await self._client.post(
-                result.download_url,
-                headers={"Accept": "application/json"},
+                "/download",
+                json={"file_id": int(result.download_url)},
             )
             resp.raise_for_status()
             data = resp.json()
@@ -125,14 +147,21 @@ class OpenSubtitlesScraper:
                 raise OpenSubtitlesError("No download link in response")
 
             # Fetch the actual file
-            resp2 = await self._client.get(link)
+            resp2 = await self._download_client.get(link)
             resp2.raise_for_status()
             return resp2.content
-        except Exception as exc:
-            raise OpenSubtitlesError(f"Subtitle download failed: {exc}") from exc
+        except httpx.HTTPStatusError as exc:
+            raise OpenSubtitlesError(
+                f"OpenSubtitles 下载失败: HTTP {exc.response.status_code}"
+            ) from exc
+        except (httpx.HTTPError, TypeError, ValueError) as exc:
+            raise OpenSubtitlesError(
+                f"OpenSubtitles 下载失败: {type(exc).__name__}"
+            ) from exc
 
     async def aclose(self) -> None:
         await self._client.aclose()
+        await self._download_client.aclose()
 
     async def _rate_limit(self) -> None:
         now = asyncio.get_event_loop().time()

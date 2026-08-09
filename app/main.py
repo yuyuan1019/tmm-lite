@@ -150,9 +150,10 @@ def create_app(
             if config.subtitle_enabled:
                 subtitle_dl = SubtitleDownloader(
                     opensubtitles_api_key=config.opensubtitles_api_key,
+                    subdl_api_key=config.subdl_api_key,
                     preferred_languages=config.subtitle_languages,
-                    opensubtitles_user_agent=config.opensubtitles_user_agent,
                     assrt_token=config.assrt_token,
+                    proxy=config.proxy,
                 )
             runner.set_subtitle_downloader(subtitle_dl)
 
@@ -886,9 +887,9 @@ def create_app(
         scheduler_enabled = form.get("scheduler_enabled") == "on"
         subtitle_enabled = form.get("subtitle_enabled") == "on"
         os_api_key = str(form.get("opensubtitles_api_key", ""))
-        subtitle_langs = str(form.get("subtitle_languages", "chi,zho,zh"))
+        subdl_api_key = str(form.get("subdl_api_key", ""))
+        subtitle_langs = str(form.get("subtitle_languages", "zh-cn"))
         assrt_tok = str(form.get("assrt_token", ""))
-        os_user_agent = str(form.get("opensubtitles_user_agent", ""))
         browse_root = str(form.get("browse_root", "/")).strip() or "/"
         proxy = str(form.get("proxy", "")).strip()
 
@@ -938,10 +939,11 @@ def create_app(
                 updates["tmdb_api_key"] = tmdb_key.strip()
             if os_api_key.strip():
                 updates["opensubtitles_api_key"] = os_api_key.strip()
+            if subdl_api_key.strip():
+                updates["subdl_api_key"] = subdl_api_key.strip()
             # ASSRT token — empty means "don't change" (password field)
             if assrt_tok.strip():
                 updates["assrt_token"] = assrt_tok.strip()
-            updates["opensubtitles_user_agent"] = os_user_agent.strip() or "TMM-Lite"
 
             # Build every candidate before touching persistent or live state.
             old_config: AppConfig = request.app.state.config
@@ -969,8 +971,8 @@ def create_app(
                 opensubtitles_api_key=(
                     os_api_key.strip() or old_config.opensubtitles_api_key
                 ),
+                subdl_api_key=subdl_api_key.strip() or old_config.subdl_api_key,
                 subtitle_languages=subtitle_langs.strip(),
-                opensubtitles_user_agent=os_user_agent.strip() or "TMM-Lite",
                 assrt_token=assrt_tok.strip() or old_config.assrt_token,
                 browse_root=browse_root,
                 proxy=proxy,
@@ -990,9 +992,10 @@ def create_app(
                 if candidate_config.subtitle_enabled:
                     candidate_subtitle = SubtitleDownloader(
                         opensubtitles_api_key=candidate_config.opensubtitles_api_key,
+                        subdl_api_key=candidate_config.subdl_api_key,
                         preferred_languages=candidate_config.subtitle_languages,
-                        opensubtitles_user_agent=candidate_config.opensubtitles_user_agent,
                         assrt_token=candidate_config.assrt_token,
+                        proxy=candidate_config.proxy,
                     )
             except Exception:
                 logger.exception("Failed to construct candidate settings resources")

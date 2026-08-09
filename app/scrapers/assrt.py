@@ -29,12 +29,14 @@ class AssrtError(TmmError):
 class AssrtScraper:
     """Async client for the ASSRT REST API."""
 
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, proxy: str = "") -> None:
         self._token = token
+        self._proxy = proxy
         self._client = httpx.AsyncClient(
             base_url=_BASE_URL,
             timeout=httpx.Timeout(15.0),
             follow_redirects=True,
+            proxy=proxy or None,
         )
         self._last_request_time = 0.0
         # ASSRT free tier is often 5 req/min (shared per token + IP); 12s
@@ -61,13 +63,13 @@ class AssrtScraper:
             resp = await self._client.get("/sub/search", params=params)
             resp.raise_for_status()
             data = resp.json()
-        except Exception as exc:  # noqa: BLE001 (API failures must not crash)
-            logger.warning("ASSRT search failed: %s", exc)
-            return []
+        except httpx.HTTPStatusError as exc:
+            raise AssrtError(f"ASSRT 搜索失败: HTTP {exc.response.status_code}") from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            raise AssrtError(f"ASSRT 搜索失败: {type(exc).__name__}") from exc
 
         if data.get("status") != 0:
-            logger.info("ASSRT search error status=%s", data.get("status"))
-            return []
+            raise AssrtError(f"ASSRT 搜索失败: API 状态 {data.get('status')}")
 
         subs = (data.get("sub") or {}).get("subs") or []
         results: list[SubtitleResult] = []
@@ -105,8 +107,10 @@ class AssrtScraper:
             )
             resp.raise_for_status()
             data = resp.json()
-        except Exception as exc:
-            raise AssrtError(f"ASSRT detail failed: {exc}") from exc
+        except httpx.HTTPStatusError as exc:
+            raise AssrtError(f"ASSRT 详情请求失败: HTTP {exc.response.status_code}") from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            raise AssrtError(f"ASSRT 详情请求失败: {type(exc).__name__}") from exc
 
         subs = (data.get("sub") or {}).get("subs") or []
         filelist = subs[0].get("filelist") or [] if subs else []

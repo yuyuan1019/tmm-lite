@@ -50,13 +50,14 @@
       <a href="https://www.opensubtitles.com/consumers" target="_blank" style="font-size:12px; margin-left:8px;">📋 申请 API Key →</a>
     </label>
     <label>
-      OpenSubtitles User-Agent：<input type="text" name="opensubtitles_user_agent" value="{{ config.opensubtitles_user_agent }}" placeholder="TMM-Lite" style="width:300px">
+      SubDL API Key（备用）：<input type="password" name="subdl_api_key" placeholder="{% if config.subdl_api_key %}已设置{% else %}未设置{% endif %}" style="width:300px">
+      <a href="https://subdl.com/panel/api" target="_blank" style="font-size:12px; margin-left:8px;">📋 获取 API Key →</a>
     </label>
     <label>
-      首选语言（ISO 639-2 码，逗号分隔）：
-      <input type="text" name="subtitle_languages" value="{{ config.subtitle_languages }}" placeholder="chi,zho,zh">
+      首选语言（默认简体中文，特殊情况可修改）：
+      <input type="text" name="subtitle_languages" value="{{ config.subtitle_languages }}" placeholder="zh-cn">
     </label>
-    <p><small>字幕源优先级：ASSRT（伪射手网，主源，中文优先）→ OpenSubtitles → SubDL。ASSRT/OS 均需免费注册获取 Token/Key。Token/Key 留空表示不修改已保存值。下载失败不影响刮削状态。</small></p>
+    <p><small>字幕源优先级：ASSRT（伪射手网，中文优先）→ OpenSubtitles → SubDL。OpenSubtitles 使用程序内置的浏览器 User-Agent，无需手动填写。语言可填写 zh-cn（简体）、zh-tw（繁体）或用逗号分隔多个值；旧值 chi,zho,zh 会自动兼容。Token/Key 留空表示不修改已保存值。</small></p>
   </fieldset>
 
   <fieldset>

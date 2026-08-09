@@ -35,6 +35,8 @@ def test_first_load_creates_file_with_defaults(tmp_data_dir: Path) -> None:
     assert config.libraries_seed == []
     assert config.effective_tmdb_api_key == ""
     assert config.proxy == ""
+    assert config.subtitle_languages == "zh-cn"
+    assert config.subdl_api_key == ""
 
 
 # ---------------------------------------------------------------------------
@@ -141,11 +143,10 @@ def test_proxy_non_string_rejected(tmp_data_dir: Path) -> None:
         ("subtitle_enabled", "false"),
         ("subtitle_enabled", 1),
         ("opensubtitles_api_key", ["secret"]),
+        ("subdl_api_key", ["secret"]),
         ("assrt_token", ["secret"]),
         ("subtitle_languages", ""),
         ("subtitle_languages", ["chi"]),
-        ("opensubtitles_user_agent", "   "),
-        ("opensubtitles_user_agent", 123),
     ],
 )
 def test_subtitle_type_validation_rejects_coercion(
@@ -161,6 +162,17 @@ def test_subtitle_type_validation_rejects_coercion(
 
     with pytest.raises(ConfigError, match=key):
         load_config(config_path)
+
+
+def test_legacy_default_subtitle_languages_migrate_to_simplified_chinese(
+    tmp_data_dir: Path,
+) -> None:
+    config_path = tmp_data_dir / "config.yaml"
+    config_path.write_text("subtitle_languages: chi,zho,zh\n", encoding="utf-8")
+
+    config = load_config(config_path)
+
+    assert config.subtitle_languages == "zh-cn"
 
 
 # ---------------------------------------------------------------------------

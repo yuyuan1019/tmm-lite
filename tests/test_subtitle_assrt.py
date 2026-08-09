@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import respx
 
-from app.scrapers.assrt import AssrtScraper
+from app.scrapers.assrt import AssrtError, AssrtScraper
 from app.scrapers.opensubtitles import SubtitleResult
 
 _SEARCH_URL = "https://api.assrt.net/v1/sub/search"
@@ -61,17 +61,19 @@ async def test_search_empty_results(scraper: AssrtScraper) -> None:
 
 
 @pytest.mark.asyncio
-async def test_search_nonzero_status_returns_empty(scraper: AssrtScraper) -> None:
+async def test_search_nonzero_status_raises(scraper: AssrtScraper) -> None:
     with respx.mock:
         respx.get(_SEARCH_URL).respond(200, json={"status": 30900})  # rate-limited
-        assert await scraper.search("x") == []
+        with pytest.raises(AssrtError, match="30900"):
+            await scraper.search("x")
 
 
 @pytest.mark.asyncio
-async def test_search_http_error_returns_empty(scraper: AssrtScraper) -> None:
+async def test_search_http_error_raises(scraper: AssrtScraper) -> None:
     with respx.mock:
         respx.get(_SEARCH_URL).respond(500)
-        assert await scraper.search("x") == []
+        with pytest.raises(AssrtError, match="HTTP 500"):
+            await scraper.search("x")
 
 
 @pytest.mark.asyncio

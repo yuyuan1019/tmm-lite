@@ -29,6 +29,10 @@ class ScrapeError(TmmError):
     """Item-level scrape failure (no results, empty title, etc.)."""
 
 
+class SubtitleError(ScrapeError):
+    """Subtitle providers were unavailable or a subtitle could not be downloaded."""
+
+
 class ScanBusyError(TmmError):
     """A scan task is already running — reject duplicate trigger."""
 

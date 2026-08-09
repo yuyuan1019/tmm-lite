@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock
+from zipfile import ZipFile
 
 import pytest
 
 from app.connection import Connection, LocalConnection
+from app.exceptions import SubtitleError
 from app.scrapers.opensubtitles import SubtitleResult
-from app.scrapers.subtitle import SubtitleDownloader, _subtitle_extension
+from app.scrapers.subtitle import (
+    SubtitleDownloader,
+    _opensubtitles_languages,
+    _subdl_languages,
+    _subtitle_extension,
+    _subtitle_suffix,
+)
 
 
 class RecordingConnection(Connection):
@@ -68,12 +77,20 @@ def _mock_subdl_download(
         ("release.ASS", ".ass"),
         ("folder/release.ssa", ".ssa"),
         (r"folder\release.VTT", ".vtt"),
+        ("release.SUB", ".sub"),
         ("release.txt", ".srt"),
         ("release", ".srt"),
     ],
 )
 def test_subtitle_extension(filename: str, expected: str) -> None:
     assert _subtitle_extension(filename) == expected
+
+
+def test_provider_language_mapping_keeps_legacy_chinese_compatible() -> None:
+    assert _opensubtitles_languages(["chi", "zho", "zh"]) == "zh-cn,zh-tw,ze"
+    assert _opensubtitles_languages(["zh-cn"]) == "zh-cn"
+    assert _subdl_languages(["chi", "zh-tw", "eng"]) == "ZH,EN"
+    assert _subtitle_suffix("中英双语") == "zh"
 
 
 @pytest.mark.asyncio
@@ -214,7 +231,7 @@ async def test_download_uses_assrt_result_first(monkeypatch: pytest.MonkeyPatch)
     returned = await downloader.download("Film", 2020, Path("/media/Film"), "video.mkv")
 
     assert returned == saved
-    assrt_search.assert_awaited_once_with("Film", 2020, "chi,zho,zh")
+    assrt_search.assert_awaited_once_with("Film", 2020, "zh-cn")
     os_search.assert_not_awaited()
     subdl_search.assert_not_awaited()
     save.assert_awaited_once()
@@ -226,7 +243,7 @@ async def test_download_falls_back_from_assrt_failure_to_opensubtitles(
 ) -> None:
     downloader = SubtitleDownloader("os-key", assrt_token="assrt-token")
     result = _result("opensubtitles")
-    assrt_search = AsyncMock(side_effect=RuntimeError("ASSRT unavailable"))
+    assrt_search = AsyncMock(side_effect=SubtitleError("ASSRT unavailable"))
     os_search = AsyncMock(return_value=result)
     subdl_search = AsyncMock()
     save = AsyncMock(return_value=Path("/saved/video.zh.srt"))
@@ -239,7 +256,7 @@ async def test_download_falls_back_from_assrt_failure_to_opensubtitles(
 
     assert returned == Path("/saved/video.zh.srt")
     assrt_search.assert_awaited_once()
-    os_search.assert_awaited_once_with("Film", 2020, "chi,zho,zh", None)
+    os_search.assert_awaited_once_with("Film", 2020, "zh-cn", None)
     subdl_search.assert_not_awaited()
     save.assert_awaited_once()
 
@@ -248,9 +265,9 @@ async def test_download_falls_back_from_assrt_failure_to_opensubtitles(
 async def test_download_falls_back_from_opensubtitles_failure_to_subdl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    downloader = SubtitleDownloader("os-key")
+    downloader = SubtitleDownloader("os-key", subdl_api_key="subdl-key")
     result = _result("subdl")
-    os_search = AsyncMock(side_effect=RuntimeError("OpenSubtitles unavailable"))
+    os_search = AsyncMock(side_effect=SubtitleError("OpenSubtitles unavailable"))
     subdl_search = AsyncMock(return_value=result)
     save = AsyncMock(return_value=Path("/saved/video.zh.srt"))
     monkeypatch.setattr(downloader, "_search_os", os_search)
@@ -261,7 +278,7 @@ async def test_download_falls_back_from_opensubtitles_failure_to_subdl(
 
     assert returned == Path("/saved/video.zh.srt")
     os_search.assert_awaited_once()
-    subdl_search.assert_awaited_once_with("Film", 2020, "chi,zho,zh")
+    subdl_search.assert_awaited_once_with("Film", 2020, "ZH", None)
     save.assert_awaited_once()
 
 
@@ -269,7 +286,9 @@ async def test_download_falls_back_from_opensubtitles_failure_to_subdl(
 async def test_download_returns_none_when_all_providers_have_no_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    downloader = SubtitleDownloader("os-key", assrt_token="assrt-token")
+    downloader = SubtitleDownloader(
+        "os-key", assrt_token="assrt-token", subdl_api_key="subdl-key"
+    )
     assrt_search = AsyncMock(return_value=None)
     os_search = AsyncMock(return_value=None)
     subdl_search = AsyncMock(return_value=None)
@@ -286,6 +305,53 @@ async def test_download_returns_none_when_all_providers_have_no_result(
     os_search.assert_awaited_once()
     subdl_search.assert_awaited_once()
     save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_download_raises_when_no_provider_is_configured() -> None:
+    downloader = SubtitleDownloader("")
+
+    with pytest.raises(SubtitleError, match="未配置可用字幕源"):
+        await downloader.download("Film", 2020, Path("/media/Film"))
+
+
+@pytest.mark.asyncio
+async def test_download_reports_provider_failure_instead_of_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    downloader = SubtitleDownloader("os-key")
+    monkeypatch.setattr(
+        downloader,
+        "_search_os",
+        AsyncMock(side_effect=SubtitleError("HTTP 401")),
+    )
+
+    with pytest.raises(SubtitleError, match="OpenSubtitles.*HTTP 401"):
+        await downloader.download("Film", 2020, Path("/media/Film"))
+
+
+@pytest.mark.asyncio
+async def test_save_extracts_supported_subtitle_from_zip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = BytesIO()
+    with ZipFile(archive, "w") as zipped:
+        zipped.writestr("readme.txt", "ignore")
+        zipped.writestr("release.srt", "srt")
+        zipped.writestr("special.ass", "ass")
+
+    downloader = SubtitleDownloader("", subdl_api_key="subdl-key")
+    _mock_subdl_download(monkeypatch, downloader, archive.getvalue())
+
+    returned = await downloader._save(
+        _result(filename="archive.zip"),
+        tmp_path,
+        "video.mkv",
+    )
+
+    assert returned == tmp_path / "video.zh.ass"
+    assert returned.read_bytes() == b"ass"
 
 
 @pytest.mark.asyncio
