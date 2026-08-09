@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import posixpath
+from collections.abc import Callable
 from io import BytesIO
 from pathlib import Path, PurePosixPath
 from zipfile import BadZipFile, ZipFile, is_zipfile
@@ -23,6 +24,8 @@ from app.scrapers.subtitle_language import (
 )
 
 logger = logging.getLogger(__name__)
+
+_ProgressCallback = Callable[[str], None]
 
 _SUBTITLE_EXTENSIONS = frozenset({".srt", ".ass", ".ssa", ".vtt", ".sub"})
 _MAX_ARCHIVE_ENTRIES = 100
@@ -196,11 +199,13 @@ class SubtitleDownloader:
         assrt_token: str = "",
         subdl_api_key: str = "",
         proxy: str = "",
+        on_progress: Callable[[str], None] | None = None,
     ) -> None:
         self._os_key = opensubtitles_api_key
         self._assrt_token = assrt_token
         self._subdl_api_key = subdl_api_key
         self._proxy = proxy
+        self._on_progress = on_progress
         self._languages = [l.strip() for l in preferred_languages.split(",") if l.strip()]
         if not self._languages:
             self._languages = ["zh-cn"]
@@ -209,6 +214,11 @@ class SubtitleDownloader:
         self._assrt: AssrtScraper | None = None
         self._os: OpenSubtitlesScraper | None = None
         self._subdl: SubDLScraper | None = None
+
+    def _emit(self, message: str) -> None:
+        """Forward a human-readable progress line to the live-log callback."""
+        if self._on_progress is not None:
+            self._on_progress(f"  {message}")
 
     async def download(
         self,
@@ -234,39 +244,51 @@ class SubtitleDownloader:
         # Try ASSRT first (Chinese-focused — best hit rate for zh subtitles)
         if self._assrt_token:
             attempted += 1
+            self._emit("尝试字幕源 ASSRT")
             try:
                 result = await self._search_assrt(title, year, assrt_languages)
                 if result is not None:
+                    self._emit(f"ASSRT 命中候选: {result.filename}")
                     return await self._save(result, media_folder, video_filename, connection)
+                self._emit("ASSRT 未找到匹配")
                 logger.info("ASSRT: 无结果 %s (%s)", title, year)
             except TmmError as exc:
                 failures.append(f"ASSRT: {exc}")
+                self._emit(f"ASSRT 失败: {exc}")
                 logger.warning("ASSRT failed, trying OpenSubtitles: %s", exc)
 
         # Try OpenSubtitles
         if self._os_key:
             attempted += 1
+            self._emit("尝试字幕源 OpenSubtitles")
             try:
                 result = await self._search_os(
                     title, year, opensubtitles_languages, imdb_id
                 )
                 if result is not None:
+                    self._emit(f"OpenSubtitles 命中候选: {result.filename}")
                     return await self._save(result, media_folder, video_filename, connection)
+                self._emit("OpenSubtitles 未找到匹配")
                 logger.info("OpenSubtitles: 无结果 %s (%s, imdb=%s)", title, year, imdb_id)
             except TmmError as exc:
                 failures.append(f"OpenSubtitles: {exc}")
+                self._emit(f"OpenSubtitles 失败: {exc}")
                 logger.warning("OpenSubtitles failed, trying SubDL: %s", exc)
 
         # Fallback to SubDL
         if self._subdl_api_key:
             attempted += 1
+            self._emit("尝试字幕源 SubDL")
             try:
                 result = await self._search_subdl(title, year, subdl_languages, imdb_id)
                 if result is not None:
+                    self._emit(f"SubDL 命中候选: {result.filename}")
                     return await self._save(result, media_folder, video_filename, connection)
+                self._emit("SubDL 未找到匹配")
                 logger.info("SubDL: 无结果 %s (%s)", title, year)
             except TmmError as exc:
                 failures.append(f"SubDL: {exc}")
+                self._emit(f"SubDL 失败: {exc}")
                 logger.warning("SubDL failed, no subtitles downloaded: %s", exc)
 
         if attempted == 0:
@@ -274,6 +296,7 @@ class SubtitleDownloader:
         if failures:
             raise SubtitleError("字幕源请求失败：" + "；".join(failures))
 
+        self._emit("所有字幕源均未返回可用结果")
         logger.info("未下载到字幕: %s (%s, imdb=%s)", title, year, imdb_id)
         return None
 
@@ -385,6 +408,7 @@ class SubtitleDownloader:
         if len(data) > _MAX_SUBTITLE_BYTES:
             raise SubtitleError("字幕文件过大，已拒绝保存")
         if expects_chinese(self._languages) and not contains_chinese_text(data):
+            self._emit(f"{result.provider} 返回的字幕不含中文，跳过")
             raise SubtitleError(
                 f"{result.provider} 返回的字幕实际不含中文，已拒绝保存并尝试下一个字幕源"
             )
@@ -395,6 +419,10 @@ class SubtitleDownloader:
         if expects_chinese(self._languages) and pref_variant is not None:
             variant = chinese_variant(data)
             if variant is not None and variant != pref_variant:
+                self._emit(
+                    f"{result.provider} 返回的字幕为{variant_label(variant)}，"
+                    f"不符合要求的{variant_label(pref_variant)}，跳过"
+                )
                 raise SubtitleError(
                     f"{result.provider} 返回的字幕为{variant_label(variant)}，"
                     f"不符合要求的{variant_label(pref_variant)}，已拒绝保存并尝试下一个字幕源"
@@ -425,5 +453,6 @@ class SubtitleDownloader:
         else:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(data)
+        self._emit(f"保存字幕文件: {dest.name}")
         logger.info("Subtitle saved: %s", dest)
         return dest

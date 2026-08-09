@@ -346,6 +346,30 @@ async def test_download_uses_assrt_result_first(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.asyncio
+async def test_download_reports_provider_steps_via_progress_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Downloader emits provider-choice and candidate details on progress."""
+    messages: list[str] = []
+    downloader = SubtitleDownloader(
+        "os-key", assrt_token="assrt-token", subdl_api_key="subdl-key",
+        on_progress=messages.append,
+    )
+    assrt_result = _result("assrt", filename="movie.简体.chs.srt")
+    save = AsyncMock(return_value=Path("/saved/video.zh.srt"))
+    monkeypatch.setattr(downloader, "_search_assrt", AsyncMock(return_value=assrt_result))
+    monkeypatch.setattr(downloader, "_save", save)
+
+    await downloader.download("Film", 2020, Path("/media/Film"), "video.mkv")
+
+    joined = "\n".join(messages)
+    assert "尝试字幕源 ASSRT" in joined
+    assert "ASSRT 命中候选: movie.简体.chs.srt" in joined
+    # SubDL was configured but ASSRT succeeded, so it must not be attempted
+    assert "SubDL" not in joined
+
+
+@pytest.mark.asyncio
 async def test_download_falls_back_from_assrt_failure_to_opensubtitles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

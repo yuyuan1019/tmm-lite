@@ -561,6 +561,8 @@ class ScanRunner:
 
     def set_subtitle_downloader(self, downloader: SubtitleDownloader | None) -> None:
         """Configure the subtitle downloader (created after runner init)."""
+        if downloader is not None:
+            downloader._on_progress = self._log_progress
         self._subtitle = downloader
 
     def reconfigure(
