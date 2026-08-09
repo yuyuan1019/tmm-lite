@@ -7,16 +7,25 @@ See implementation spec §11 for route contracts.
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import math
+import os
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import quote, unquote
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy import func, select
@@ -51,6 +60,7 @@ from app.scheduler import ScrapeScheduler
 from app.scrapers.douban import DoubanScraper
 from app.scrapers.subtitle import SubtitleDownloader
 from app.scrapers.tmdb import TmdbScraper
+from app.streaming import RangeNotSatisfiable, iter_connection_bytes, parse_byte_range
 
 logger = logging.getLogger(__name__)
 
@@ -97,74 +107,119 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
-        # Bootstrap
-        data_dir.mkdir(parents=True, exist_ok=True)
-        config_path = data_dir / "config.yaml"
-        db_path = data_dir / "tmm-lite.db"
-
-        config = load_config(config_path)
-        engine = init_db(db_path)
-        session_factory = create_session_factory(engine)
-
-        # Seed import (one-time)
-        _run_seed_import(session_factory, config)
-
-        # Scrapers
-        tmdb = TmdbScraper(
-            config.effective_tmdb_api_key, config.language, config.proxy,
-            min_interval=config.tmdb_delay_seconds,
-        )
-        douban = DoubanScraper(config.douban_delay_seconds) if config.use_douban else None
-
-        # Encryption key (for connection credentials)
-        enc_key = load_or_create_key(data_dir)
-
-        # Runner
-        runner = ScanRunner(session_factory, config, tmdb, douban, enc_key=enc_key)
-
-        # Subtitle downloader
+        engine: Any = None
+        tmdb: TmdbScraper | None = None
+        douban: DoubanScraper | None = None
+        runner: ScanRunner | None = None
         subtitle_dl: SubtitleDownloader | None = None
-        if config.subtitle_enabled:
-            subtitle_dl = SubtitleDownloader(
-                opensubtitles_api_key=config.opensubtitles_api_key,
-                preferred_languages=config.subtitle_languages,
-                opensubtitles_user_agent=config.opensubtitles_user_agent,
-                assrt_token=config.assrt_token,
-            )
-        runner.set_subtitle_downloader(subtitle_dl)
-
-        # Scheduler
-        scheduler = ScrapeScheduler(runner)
-        if start_scheduler:
-            scheduler.start(config.schedule_cron)
-            if not config.scheduler_enabled:
-                scheduler.pause()
-
-        # Store on app state
-        app.state.config = config
-        app.state.enc_key = enc_key
-        app.state.session_factory = session_factory
-        app.state.runner = runner
-        app.state.scheduler = scheduler
-        app.state.tmdb = tmdb
-        app.state.douban = douban
-        app.state.subtitle_dl = subtitle_dl
-        app.state.config_path = config_path
-        app.state.settings_lock = asyncio.Lock()
-
+        scheduler: ScrapeScheduler | None = None
+        state_ready = False
         try:
+            # Bootstrap
+            data_dir.mkdir(parents=True, exist_ok=True)
+            config_path = data_dir / "config.yaml"
+            db_path = data_dir / "tmm-lite.db"
+
+            config = load_config(config_path)
+            engine = init_db(db_path)
+            session_factory = create_session_factory(engine)
+
+            # Seed import (one-time)
+            _run_seed_import(session_factory, config)
+
+            # Scrapers
+            tmdb = TmdbScraper(
+                config.effective_tmdb_api_key,
+                config.language,
+                config.proxy,
+                min_interval=config.tmdb_delay_seconds,
+            )
+            douban = (
+                DoubanScraper(config.douban_delay_seconds)
+                if config.use_douban
+                else None
+            )
+
+            # Encryption key (for connection credentials)
+            enc_key = load_or_create_key(data_dir)
+
+            # Runner
+            runner = ScanRunner(session_factory, config, tmdb, douban, enc_key=enc_key)
+
+            # Subtitle downloader
+            if config.subtitle_enabled:
+                subtitle_dl = SubtitleDownloader(
+                    opensubtitles_api_key=config.opensubtitles_api_key,
+                    preferred_languages=config.subtitle_languages,
+                    opensubtitles_user_agent=config.opensubtitles_user_agent,
+                    assrt_token=config.assrt_token,
+                )
+            runner.set_subtitle_downloader(subtitle_dl)
+
+            # Scheduler
+            scheduler = ScrapeScheduler(runner)
+            if start_scheduler:
+                scheduler.start(config.schedule_cron)
+                if not config.scheduler_enabled:
+                    scheduler.pause()
+
+            # Store on app state. Settings hot-reload replaces these references;
+            # shutdown must always close the resources that are active then.
+            app.state.config = config
+            app.state.enc_key = enc_key
+            app.state.session_factory = session_factory
+            app.state.runner = runner
+            app.state.scheduler = scheduler
+            app.state.tmdb = tmdb
+            app.state.douban = douban
+            app.state.subtitle_dl = subtitle_dl
+            app.state.config_path = config_path
+            app.state.settings_lock = asyncio.Lock()
+            state_ready = True
+
             yield
         finally:
-            # Graceful shutdown
-            scheduler.pause()
-            await runner.shutdown()
-            await scheduler.shutdown()
-            if subtitle_dl is not None:
-                await subtitle_dl.aclose()
-            await tmdb.aclose()
-            if douban is not None:
-                await douban.aclose()
-            engine.dispose()
+            active_runner = app.state.runner if state_ready else runner
+            active_scheduler = app.state.scheduler if state_ready else scheduler
+            active_subtitle = app.state.subtitle_dl if state_ready else subtitle_dl
+            active_tmdb = app.state.tmdb if state_ready else tmdb
+            active_douban = app.state.douban if state_ready else douban
+
+            if active_scheduler is not None:
+                try:
+                    active_scheduler.pause()
+                except Exception:
+                    logger.exception("Failed to pause scheduler during shutdown")
+            if active_runner is not None:
+                try:
+                    await active_runner.shutdown()
+                except Exception:
+                    logger.exception("Failed to stop scanner during shutdown")
+            if active_scheduler is not None:
+                try:
+                    await active_scheduler.shutdown()
+                except Exception:
+                    logger.exception("Failed to shut down scheduler")
+
+            closed_resources: set[int] = set()
+
+            async def _close_once(resource: object | None, label: str) -> None:
+                if resource is None or id(resource) in closed_resources:
+                    return
+                closed_resources.add(id(resource))
+                try:
+                    await resource.aclose()  # type: ignore[attr-defined]
+                except Exception:
+                    logger.exception("Failed to close %s during shutdown", label)
+
+            await _close_once(active_subtitle, "subtitle downloader")
+            await _close_once(active_tmdb, "TMDB scraper")
+            await _close_once(active_douban, "Douban scraper")
+            if engine is not None:
+                try:
+                    engine.dispose()
+                except Exception:
+                    logger.exception("Failed to dispose database engine")
 
     app = FastAPI(lifespan=lifespan)
 
@@ -330,12 +385,17 @@ def create_app(
                     continue
                 try:
                     cfg = decrypt_dict(lib.connection_config_encrypted, enc_key)
-                except Exception:  # noqa: BLE001
+                except Exception:
+                    logger.warning(
+                        "Failed to decrypt saved connection for library %s",
+                        lib.id,
+                        exc_info=True,
+                    )
                     continue
                 host = str(cfg.get("host", "")).strip()
                 username = str(cfg.get("username", "")).strip()
                 try:
-                    port_i = int(cfg.get("port") or 0)
+                    port_i = int(str(cfg.get("port") or 0))
                 except (TypeError, ValueError):
                     port_i = 0
                 if not host:
@@ -384,9 +444,9 @@ def create_app(
         conn_password: str = Form(""),
         source_lib_id: str = Form(""),
     ) -> Any:
-        # Adding a library is just a DB row insert; allow it even while a
-        # scan runs (the new library is picked up on the next scan/rescan).
-        # Only re-scan itself is mutually exclusive.
+        runner: ScanRunner = request.app.state.runner
+        if runner.is_running:
+            return _redirect("/libraries", err="任务正在运行中，暂不能修改媒体库")
 
         # Validate
         if not name.strip():
@@ -397,7 +457,7 @@ def create_app(
             return _redirect("/libraries", err="路径必须是绝对路径")
         if media_type not in ("movie", "tv"):
             return _redirect("/libraries", err="类型无效")
-        if connection_type not in ("local", "ssh", "webdav", "smb"):
+        if connection_type not in ("local", "ssh", "webdav"):
             return _redirect("/libraries", err="连接方式无效")
 
         norm_path = normalize_path(path)
@@ -422,7 +482,7 @@ def create_app(
                         src = None
                     if (
                         src is None
-                        or src.connection_type == "local"
+                        or src.connection_type not in ("ssh", "webdav")
                         or not src.connection_config_encrypted
                     ):
                         return _redirect("/libraries", err="所选连接不可用，请重新选择")
@@ -436,6 +496,10 @@ def create_app(
                         port = int(conn_port) if conn_port.strip() else (22 if connection_type == "ssh" else 443)
                     except ValueError:
                         return _redirect("/libraries", err="端口必须是数字")
+                    if not conn_host.strip():
+                        return _redirect("/libraries", err="远程主机不能为空")
+                    if not 1 <= port <= 65535:
+                        return _redirect("/libraries", err="端口必须在 1 到 65535 之间")
                     cfg = {
                         "host": conn_host.strip(),
                         "port": port,
@@ -492,10 +556,9 @@ def create_app(
 
     @app.post("/libraries/{lib_id}/delete")
     async def libraries_delete(request: Request, lib_id: int) -> Any:
-        # Deleting a library is allowed while a scan runs. If the deleted
-        # library happens to be the one currently being scanned, per-item
-        # inserts may log FK errors, but the scan's try/finally still
-        # releases the run lock — no crash, no stuck state.
+        runner: ScanRunner = request.app.state.runner
+        if runner.is_running:
+            return _redirect("/libraries", err="任务正在运行中，暂不能修改媒体库")
 
         sess = request.app.state.session_factory()
         try:
@@ -615,11 +678,13 @@ def create_app(
             return {"items": []}
         if media_type not in ("movie", "tv"):
             return JSONResponse({"error": "media_type 无效", "items": []}, status_code=400)
-        tmdb = request.app.state.tmdb
-        try:
-            items = await tmdb.search_candidates(title.strip(), media_type)
-        except Exception as exc:  # noqa: BLE001 (search is best-effort)
-            return JSONResponse({"error": str(exc), "items": []}, status_code=500)
+        lock: asyncio.Lock = request.app.state.settings_lock
+        async with lock:
+            tmdb = request.app.state.tmdb
+            try:
+                items = await tmdb.search_candidates(title.strip(), media_type)
+            except Exception as exc:  # noqa: BLE001 (search is best-effort)
+                return JSONResponse({"error": str(exc), "items": []}, status_code=500)
         return {"items": items}
 
     # ------------------------------------------------------------------
@@ -799,6 +864,15 @@ def create_app(
     @app.post("/settings")
     async def settings_save(request: Request) -> Any:
         lock: asyncio.Lock = request.app.state.settings_lock
+        candidate_tmdb: TmdbScraper | None = None
+        candidate_douban: DoubanScraper | None = None
+        candidate_subtitle: SubtitleDownloader | None = None
+        old_resources: tuple[
+            TmdbScraper | None,
+            DoubanScraper | None,
+            SubtitleDownloader | None,
+        ] = (None, None, None)
+        settings_error: str | None = None
 
         # Collect form data (cast to str — no file uploads in settings)
         form = await request.form()
@@ -869,96 +943,117 @@ def create_app(
                 updates["assrt_token"] = assrt_tok.strip()
             updates["opensubtitles_user_agent"] = os_user_agent.strip() or "TMM-Lite"
 
-            # Save old state for rollback
+            # Build every candidate before touching persistent or live state.
             old_config: AppConfig = request.app.state.config
             old_cron = old_config.schedule_cron
-
+            scheduler: ScrapeScheduler = request.app.state.scheduler
+            old_scheduler_paused = scheduler.paused
+            config_path: Path = request.app.state.config_path
             try:
-                new_config = save_config(updates, request.app.state.config_path)
-            except ConfigError as exc:
-                return _redirect("/settings", err=str(exc))
-
-            # Prepare new scrapers
-            new_tmdb = TmdbScraper(
-                new_config.effective_tmdb_api_key, new_config.language, new_config.proxy,
-                min_interval=new_config.tmdb_delay_seconds,
+                previous_config_bytes = config_path.read_bytes()
+            except OSError:
+                logger.exception("Failed to snapshot config before settings update")
+                return _redirect("/settings", err="设置保存失败，原设置未变")
+            candidate_config = replace(
+                old_config,
+                tmdb_api_key=(
+                    "" if clear_key else tmdb_key.strip() or old_config.tmdb_api_key
+                ),
+                use_douban=use_douban,
+                douban_delay_seconds=delay,
+                tmdb_delay_seconds=tmdb_delay,
+                overwrite_existing_nfo=overwrite,
+                schedule_cron=cron_str,
+                scheduler_enabled=scheduler_enabled,
+                subtitle_enabled=subtitle_enabled,
+                opensubtitles_api_key=(
+                    os_api_key.strip() or old_config.opensubtitles_api_key
+                ),
+                subtitle_languages=subtitle_langs.strip(),
+                opensubtitles_user_agent=os_user_agent.strip() or "TMM-Lite",
+                assrt_token=assrt_tok.strip() or old_config.assrt_token,
+                browse_root=browse_root,
+                proxy=proxy,
             )
-            new_douban = DoubanScraper(new_config.douban_delay_seconds) if new_config.use_douban else None
-
-            # Apply to running objects (commit point)
             try:
-                request.app.state.scheduler.reschedule(cron_str)
-                if new_config.scheduler_enabled:
-                    request.app.state.scheduler.resume()
-                else:
-                    request.app.state.scheduler.pause()
-                old_tmdb, old_douban = runner.reconfigure(new_config, new_tmdb, new_douban)
-
-                # Recreate subtitle downloader
-                old_sub = request.app.state.subtitle_dl
-                new_sub: SubtitleDownloader | None = None
-                if new_config.subtitle_enabled:
-                    new_sub = SubtitleDownloader(
-                        opensubtitles_api_key=new_config.opensubtitles_api_key,
-                        preferred_languages=new_config.subtitle_languages,
-                        opensubtitles_user_agent=new_config.opensubtitles_user_agent,
-                        assrt_token=new_config.assrt_token,
+                candidate_tmdb = TmdbScraper(
+                    candidate_config.effective_tmdb_api_key,
+                    candidate_config.language,
+                    candidate_config.proxy,
+                    min_interval=candidate_config.tmdb_delay_seconds,
+                )
+                candidate_douban = (
+                    DoubanScraper(candidate_config.douban_delay_seconds)
+                    if candidate_config.use_douban
+                    else None
+                )
+                if candidate_config.subtitle_enabled:
+                    candidate_subtitle = SubtitleDownloader(
+                        opensubtitles_api_key=candidate_config.opensubtitles_api_key,
+                        preferred_languages=candidate_config.subtitle_languages,
+                        opensubtitles_user_agent=candidate_config.opensubtitles_user_agent,
+                        assrt_token=candidate_config.assrt_token,
                     )
-                runner.set_subtitle_downloader(new_sub)
-                request.app.state.subtitle_dl = new_sub
-            except Exception:  # noqa: BLE001 (rollback on any failure)
-                # Rollback: restore old config file
-                rollback: dict[str, object] = {
-                    "tmdb_api_key": old_config.tmdb_api_key,
-                    "use_douban": old_config.use_douban,
-                    "douban_delay_seconds": old_config.douban_delay_seconds,
-                    "tmdb_delay_seconds": old_config.tmdb_delay_seconds,
-                    "overwrite_existing_nfo": old_config.overwrite_existing_nfo,
-                    "schedule_cron": old_cron,
-                    "scheduler_enabled": old_config.scheduler_enabled,
-                    "language": old_config.language,
-                    "subtitle_enabled": old_config.subtitle_enabled,
-                    "opensubtitles_api_key": old_config.opensubtitles_api_key,
-                    "opensubtitles_user_agent": old_config.opensubtitles_user_agent,
-                    "assrt_token": old_config.assrt_token,
-                    "subtitle_languages": old_config.subtitle_languages,
-                    "browse_root": old_config.browse_root,
-                    "proxy": old_config.proxy,
-                }
-                try:
-                    save_config(rollback, request.app.state.config_path)
-                except Exception:
-                    logger.exception("Rollback config failed")
-                try:
-                    request.app.state.scheduler.reschedule(old_cron)
-                except Exception:
-                    logger.exception("Rollback scheduler failed")
-                # Close candidate scrapers
-                await new_tmdb.aclose()
-                if new_douban is not None:
-                    await new_douban.aclose()
-                return _redirect("/settings", err="设置保存失败，已回滚")
+            except Exception:
+                logger.exception("Failed to construct candidate settings resources")
+                settings_error = "设置保存失败，原设置未变"
 
-            # Update app state
-            request.app.state.config = new_config
-            request.app.state.tmdb = new_tmdb
-            request.app.state.douban = new_douban
+            if settings_error is None:
+                try:
+                    new_config = save_config(updates, config_path)
+                    scheduler.reschedule(new_config.schedule_cron)
+                    if new_config.scheduler_enabled:
+                        scheduler.resume()
+                    else:
+                        scheduler.pause()
 
-            # Close old scrapers (best-effort)
+                    assert candidate_tmdb is not None
+                    old_tmdb, old_douban = runner.reconfigure(
+                        new_config,
+                        candidate_tmdb,
+                        candidate_douban,
+                    )
+                except Exception:
+                    logger.exception("Settings commit failed; restoring previous state")
+                    try:
+                        _restore_file_bytes(config_path, previous_config_bytes)
+                    except Exception:
+                        logger.exception("Rollback config failed")
+                    try:
+                        scheduler.reschedule(old_cron)
+                        if old_scheduler_paused:
+                            scheduler.pause()
+                        else:
+                            scheduler.resume()
+                    except Exception:
+                        logger.exception("Rollback scheduler failed")
+                    settings_error = "设置保存失败，已回滚"
+                else:
+                    old_subtitle = request.app.state.subtitle_dl
+                    runner.set_subtitle_downloader(candidate_subtitle)
+                    request.app.state.config = new_config
+                    request.app.state.tmdb = candidate_tmdb
+                    request.app.state.douban = candidate_douban
+                    request.app.state.subtitle_dl = candidate_subtitle
+                    old_resources = (old_tmdb, old_douban, old_subtitle)
+
+        resources_to_close = (
+            (candidate_tmdb, candidate_douban, candidate_subtitle)
+            if settings_error is not None
+            else old_resources
+        )
+        closed_ids: set[int] = set()
+        for resource in resources_to_close:
+            if resource is None or id(resource) in closed_ids:
+                continue
+            closed_ids.add(id(resource))
             try:
-                await old_tmdb.aclose()
-            except Exception:  # noqa: BLE001 (rollback on any failure)
-                logger.warning("Failed to close old TMDB scraper")
-            if old_douban is not None:
-                try:
-                    await old_douban.aclose()
-                except Exception:  # noqa: BLE001 (rollback on any failure)
-                    logger.warning("Failed to close old Douban scraper")
-            if old_sub is not None:
-                try:
-                    await old_sub.aclose()
-                except Exception:  # noqa: BLE001 (rollback on any failure)
-                    logger.warning("Failed to close old subtitle downloader")
+                await resource.aclose()
+            except Exception:
+                logger.exception("Failed to close superseded settings resource")
+
+        if settings_error is not None:
+            return _redirect("/settings", err=settings_error)
 
         return _redirect("/settings", ok="设置已保存")
 
@@ -1067,20 +1162,20 @@ def create_app(
                     from app.scanner import _find_video_file_async, _relative_folder
                     rel = _relative_folder(item.folder_path, lib.path)
                     if Path(rel).suffix.lower() in VIDEO_EXTENSIONS:
-                        video_rel = rel
+                        video_path: str | None = rel
                     else:
-                        video_rel = await _find_video_file_async(conn, rel)
-                        if video_rel is None:
-                            video_rel = await _find_video_deep(conn, rel)
-                    if video_rel is not None:
+                        video_path = await _find_video_file_async(conn, rel)
+                        if video_path is None:
+                            video_path = await _find_video_deep(conn, rel)
+                    if video_path is not None:
                         file_info = {
                             "found": True,
-                            "ext": Path(video_rel).suffix.lower(),
-                            "size": await conn.file_size(video_rel),
-                            "filename": Path(video_rel).name,
+                            "ext": Path(video_path).suffix.lower(),
+                            "size": await conn.file_size(video_path),
+                            "filename": Path(video_path).name,
                         }
                 except Exception:
-                    pass
+                    logger.warning("Player probe failed for item %s", item_id, exc_info=True)
                 finally:
                     await conn.aclose()
 
@@ -1095,8 +1190,6 @@ def create_app(
     @app.get("/api/stream/{item_id}")
     async def stream_video(request: Request, item_id: int) -> Any:
         """Stream a video file with HTTP Range support (for HTML5 <video>)."""
-        from starlette.responses import StreamingResponse
-
         sess = request.app.state.session_factory()
         try:
             item = sess.get(MediaItem, item_id)
@@ -1118,15 +1211,15 @@ def create_app(
 
             # First check: is the item itself a loose video file?
             if Path(rel).suffix.lower() in VIDEO_EXTENSIONS:
-                video_rel = rel
+                stream_path: str | None = rel
             else:
-                video_rel = await _find_video_file_async(conn, rel)
+                stream_path = await _find_video_file_async(conn, rel)
                 # Fallback: search deeper (some folder structures nest video
                 # files more than 2 levels deep, e.g. BDMV/STREAM/xxx.m2ts)
-                if video_rel is None:
-                    video_rel = await _find_video_deep(conn, rel)
+                if stream_path is None:
+                    stream_path = await _find_video_deep(conn, rel)
 
-            if video_rel is None:
+            if stream_path is None:
                 logger.warning(
                     "Stream: no video file found for item %s (rel=%s)",
                     item_id, rel,
@@ -1138,64 +1231,55 @@ def create_app(
                 )
 
             # Determine file size and MIME type
-            file_size = await conn.file_size(video_rel)
-            ext = Path(video_rel).suffix.lower()
+            file_size = await conn.file_size(stream_path)
+            ext = Path(stream_path).suffix.lower()
             content_type = _video_mime(ext)
 
-            # Parse Range header
-            range_header = request.headers.get("range")
-            if range_header:
-                # Support "bytes=start-end" format
-                import re
-                m = re.match(r"bytes=(\d+)-(\d*)", range_header)
-                if m:
-                    start = int(m.group(1))
-                    end_str = m.group(2)
-                    if end_str:
-                        end = min(int(end_str), file_size - 1)
-                    else:
-                        end = file_size - 1
-                    chunk_size = end - start + 1
-
-                    data = await conn.read_range(video_rel, start, chunk_size)
-                    await conn.aclose()
-
-                    headers: dict[str, str] = {
-                        "Content-Range": f"bytes {start}-{end}/{file_size}",
+            try:
+                byte_range = parse_byte_range(request.headers.get("range"), file_size)
+            except RangeNotSatisfiable:
+                await conn.aclose()
+                return Response(
+                    status_code=416,
+                    headers={
+                        "Content-Range": f"bytes */{file_size}",
                         "Accept-Ranges": "bytes",
-                        "Content-Length": str(len(data)),
-                        "Content-Type": content_type,
-                    }
-                    return StreamingResponse(
-                        _single_chunk(data),
-                        status_code=206,
-                        headers=headers,
-                    )
+                    },
+                )
 
-            # No range — stream full file in chunks
-            CHUNK = 1024 * 1024  # 1 MiB
-            async def _stream_full() -> Any:
+            if byte_range is None:
+                start = 0
+                end = file_size - 1
+                status_code = 200
+                headers: dict[str, str] = {
+                    "Content-Length": str(file_size),
+                    "Content-Type": content_type,
+                    "Accept-Ranges": "bytes",
+                }
+            else:
+                start = byte_range.start
+                end = byte_range.end
+                status_code = 206
+                headers = {
+                    "Content-Range": f"bytes {start}-{end}/{file_size}",
+                    "Accept-Ranges": "bytes",
+                    "Content-Length": str(end - start + 1),
+                    "Content-Type": content_type,
+                }
+
+            async def _stream_bounded() -> Any:
                 try:
-                    pos = 0
-                    while pos < file_size:
-                        size = min(CHUNK, file_size - pos)
-                        chunk = await conn.read_range(video_rel, pos, size)
-                        if not chunk:
-                            break
+                    if end < start:  # Empty full representation.
+                        return
+                    async for chunk in iter_connection_bytes(conn, stream_path, start, end):
                         yield chunk
-                        pos += len(chunk)
                 finally:
                     await conn.aclose()
 
             return StreamingResponse(
-                _stream_full(),
-                status_code=200,
-                headers={
-                    "Content-Length": str(file_size),
-                    "Content-Type": content_type,
-                    "Accept-Ranges": "bytes",
-                },
-                media_type=content_type,
+                _stream_bounded(),
+                status_code=status_code,
+                headers=headers,
             )
         except Exception:
             await conn.aclose()
@@ -1258,16 +1342,19 @@ def create_app(
                     status_code=400,
                 )
             try:
-                cfg = decrypt_dict(src.connection_config_encrypted, request.app.state.enc_key)
+                decrypted_cfg = decrypt_dict(
+                    src.connection_config_encrypted,
+                    request.app.state.enc_key,
+                )
             except Exception:  # noqa: BLE001
                 return JSONResponse(
                     {"error": "连接凭据解密失败", "items": []}, status_code=500
                 )
             connection_type = src.connection_type
-            host = str(cfg.get("host", ""))
-            port = str(cfg.get("port") or "")
-            username = str(cfg.get("username", ""))
-            password = str(cfg.get("password") or "")
+            host = str(decrypted_cfg.get("host", ""))
+            port = str(decrypted_cfg.get("port") or "")
+            username = str(decrypted_cfg.get("username", ""))
+            password = str(decrypted_cfg.get("password") or "")
 
         try:
             if connection_type == "local":
@@ -1345,14 +1432,14 @@ def create_app(
                 browse_port = int(port) if port.strip() else 0
             except ValueError:
                 return JSONResponse({"error": "端口必须是数字", "items": []}, status_code=400)
-            cfg = ConnectionConfig(
+            connection_config = ConnectionConfig(
                 type=connection_type,
                 host=host.strip(),
                 port=browse_port,
                 username=username.strip(),
                 password=password,
             )
-            conn = create_connection(cfg, "")
+            conn = create_connection(connection_config, "")
             try:
                 entries = await conn.list_dir(path)
                 dirs_only: list[dict[str, str]] = []
@@ -1415,6 +1502,17 @@ def _run_seed_import(session_factory: Any, config: AppConfig) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _restore_file_bytes(path: Path, data: bytes) -> None:
+    """Atomically restore an exact file snapshot after a failed settings commit."""
+    temporary = path.with_name(path.name + ".rollback.tmp")
+    try:
+        temporary.write_bytes(data)
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def _filter_localtime(dt: datetime | None) -> str:
     """UTC datetime → local time string for display."""
     if dt is None:
@@ -1442,6 +1540,7 @@ def _format_time(dt: datetime | None) -> str:
 def _play_page_html(item_id: int, title: str, file_info: dict[str, object] | None = None) -> str:
     """Return an HTML5 video player page for *item_id* with codec guidance."""
     stream_url = f"/api/stream/{item_id}"
+    safe_title = html.escape(title, quote=True)
 
     # Determine browser compatibility
     ext = str(file_info.get("ext", "")) if file_info else ""
@@ -1449,12 +1548,13 @@ def _play_page_html(item_id: int, title: str, file_info: dict[str, object] | Non
     fsize_mb = ""
     if file_info and file_info.get("size"):
         try:
-            fsize_mb = f"{(int(file_info['size']) / 1048576):.1f} MB"
+            fsize_mb = f"{(int(str(file_info['size'])) / 1048576):.1f} MB"
         except (ValueError, TypeError):
             pass
 
     browser_ok = ext in (".mp4", ".webm", ".mov")
     format_label = ext.upper().lstrip(".") if ext else "?"
+    safe_format_label = html.escape(format_label, quote=True)
     format_note = ""
     if ext == ".mkv":
         format_note = "MKV 容器通常含 HEVC/DTS 编码，浏览器无法解码"
@@ -1467,10 +1567,11 @@ def _play_page_html(item_id: int, title: str, file_info: dict[str, object] | Non
 
     file_info_html = ""
     if file_info and file_info.get("found"):
+        safe_fname = html.escape(fname, quote=True)
         file_info_html = f"""
 <div style="background:#1a1a2e;border-radius:8px;padding:12px 16px;margin-bottom:16px;font-size:13px;line-height:1.8;">
-  <div>📁 <b>{fname}</b></div>
-  <div style="color:#888;">格式: {format_label} | 大小: {fsize_mb}</div>
+  <div>📁 <b>{safe_fname}</b></div>
+  <div style="color:#888;">格式: {safe_format_label} | 大小: {fsize_mb}</div>
   <div style="color:#e67e22;margin-top:4px;">{format_note}</div>
 </div>"""
 
@@ -1479,7 +1580,7 @@ def _play_page_html(item_id: int, title: str, file_info: dict[str, object] | Non
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{title} — 在线播放</title>
+<title>{safe_title} — 在线播放</title>
 <style>
 * {{ margin:0; padding:0; box-sizing:border-box; }}
 body {{ background:#0a0a0a; color:#ccc; font-family:-apple-system,sans-serif; display:flex; flex-direction:column; height:100vh; }}
@@ -1502,10 +1603,10 @@ video {{ max-width:100%; max-height:60vh; background:#000; border-radius:4px; }}
 <body>
 <div class="header">
   <a href="/preview">← 返回影视库</a>
-  <h2>{title}</h2>
+  <h2>{safe_title}</h2>
   <span id="status" style="font-size:12px;color:#888;"></span>
 </div>
-<div class="player-wrap" id="playerWrap">
+<div class="player-wrap" id="playerWrap" data-format-label="{safe_format_label}">
   {file_info_html}
   <div id="loading" class="loading" style="display:flex;flex-direction:column;align-items:center;">
     <div class="spinner"></div><div>正在检测视频流…</div>
@@ -1541,6 +1642,7 @@ var fullUrl = window.location.origin + streamUrl;
 var _probeDone = false;
 var _loadTimer = null;
 var _browserOk = {'true' if browser_ok else 'false'};
+var formatLabel = document.getElementById('playerWrap').dataset.formatLabel || '?';
 
 document.getElementById('streamUrl').textContent = fullUrl;
 
@@ -1548,7 +1650,7 @@ document.getElementById('streamUrl').textContent = fullUrl;
 if (!_browserOk) {{
   document.getElementById('loading').style.display = 'none';
   document.getElementById('fallback').style.display = 'block';
-  document.getElementById('fallbackReason').textContent = '{format_label} 格式 — 推荐使用外部播放器';
+  document.getElementById('fallbackReason').textContent = formatLabel + ' 格式 — 推荐使用外部播放器';
   document.getElementById('status').textContent = '需外部播放器';
 }} else {{
   // Probe: first byte range request to verify the stream
@@ -1665,11 +1767,6 @@ def _video_mime(ext: str) -> str:
         ".ts": "video/mp2t",
         ".m2ts": "video/mp2t",
     }.get(ext, "application/octet-stream")
-
-
-async def _single_chunk(data: bytes) -> Any:
-    """Async generator that yields a single chunk (for range responses)."""
-    yield data
 
 
 def _read_proc_mounts() -> dict[str, str]:

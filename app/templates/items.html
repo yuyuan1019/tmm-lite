@@ -124,31 +124,71 @@ function openRescrape(btn, itemId, mediaType) {
 }
 function closeRescrape() { document.getElementById('rescrape_modal').style.display = 'none'; }
 
+function showSearchMessage(box, message, isError, italic) {
+  var p = document.createElement('p');
+  if (isError) p.style.color = 'red';
+  if (italic) {
+    var em = document.createElement('em');
+    em.textContent = message;
+    p.appendChild(em);
+  } else {
+    p.textContent = message;
+  }
+  box.replaceChildren(p);
+}
+
 function searchRescrape() {
   var t = document.getElementById('rescrape_title').value.trim();
   var box = document.getElementById('rescrape_results');
-  if (!t) { box.innerHTML = '<p><em>请输入标题</em></p>'; return; }
-  box.innerHTML = '<p>搜索中…</p>';
+  if (!t) { showSearchMessage(box, '请输入标题', false, true); return; }
+  showSearchMessage(box, '搜索中…', false, false);
   fetch('/api/search?title=' + encodeURIComponent(t) + '&media_type=' + rescrapeType)
     .then(function(r) { return r.json(); })
     .then(function(data) {
-      if (data.error) { box.innerHTML = '<p style="color:red">' + data.error + '</p>'; return; }
-      if (!data.items || !data.items.length) { box.innerHTML = '<p><em>无搜索结果</em></p>'; return; }
-      var html = '';
+      if (data.error) { showSearchMessage(box, String(data.error), true, false); return; }
+      if (!data.items || !data.items.length) {
+        showSearchMessage(box, '无搜索结果', false, true);
+        return;
+      }
+      var fragment = document.createDocumentFragment();
       data.items.forEach(function(it) {
-        var poster = it.poster
-          ? '<img src="' + it.poster + '" style="width:40px; height:56px; object-fit:cover; border-radius:3px; margin-right:10px; vertical-align:middle;">'
-          : '';
-        html += '<div style="padding:8px; border-bottom:1px solid #eee; display:flex; align-items:center;">'
-          + poster
-          + '<div style="flex:1;">' + (it.title || '') + ' <small style="color:#888;">(' + (it.year || '') + ')</small>'
-          + '<div style="font-size:12px; color:#999;">' + (it.original_title || '') + '</div></div>'
-          + '<button type="button" onclick="chooseRescrape(' + it.id + ')" style="font-size:12px;">选择</button>'
-          + '</div>';
+        var row = document.createElement('div');
+        row.style.cssText = 'padding:8px;border-bottom:1px solid #eee;display:flex;align-items:center;';
+        if (it.poster) {
+          var poster = document.createElement('img');
+          poster.src = String(it.poster);
+          poster.style.cssText = 'width:40px;height:56px;object-fit:cover;border-radius:3px;margin-right:10px;vertical-align:middle;';
+          row.appendChild(poster);
+        }
+
+        var titles = document.createElement('div');
+        titles.style.flex = '1';
+        var title = document.createElement('span');
+        title.textContent = String(it.title || '');
+        titles.appendChild(title);
+        var year = document.createElement('small');
+        year.style.color = '#888';
+        year.textContent = ' (' + String(it.year || '') + ')';
+        titles.appendChild(year);
+        var original = document.createElement('div');
+        original.style.cssText = 'font-size:12px;color:#999;';
+        original.textContent = String(it.original_title || '');
+        titles.appendChild(original);
+        row.appendChild(titles);
+
+        var choose = document.createElement('button');
+        choose.type = 'button';
+        choose.style.fontSize = '12px';
+        choose.textContent = '选择';
+        choose.addEventListener('click', function() { chooseRescrape(it.id); });
+        row.appendChild(choose);
+        fragment.appendChild(row);
       });
-      box.innerHTML = html;
+      box.replaceChildren(fragment);
     })
-    .catch(function(err) { box.innerHTML = '<p style="color:red">搜索失败: ' + err + '</p>'; });
+    .catch(function(err) {
+      showSearchMessage(box, '搜索失败: ' + String(err), true, false);
+    });
 }
 
 function _rescrapeForm(extra) {

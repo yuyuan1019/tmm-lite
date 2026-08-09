@@ -105,7 +105,7 @@ class AssrtScraper:
             )
             resp.raise_for_status()
             data = resp.json()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise AssrtError(f"ASSRT detail failed: {exc}") from exc
 
         subs = (data.get("sub") or {}).get("subs") or []

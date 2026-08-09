@@ -6,7 +6,8 @@ Best-effort: failures are logged but never propagate to the caller.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+import posixpath
+from pathlib import Path, PurePosixPath
 
 from app.connection import Connection
 from app.scrapers.assrt import AssrtScraper
@@ -14,6 +15,8 @@ from app.scrapers.opensubtitles import OpenSubtitlesScraper, SubtitleResult
 from app.scrapers.subdl import SubDLScraper
 
 logger = logging.getLogger(__name__)
+
+_SUBTITLE_EXTENSIONS = frozenset({".srt", ".ass", ".ssa", ".vtt"})
 
 # ISO 639-2 codes for common subtitle languages
 _LANG_MAP = {
@@ -32,6 +35,17 @@ _LANG_MAP = {
     "th": "tha",
     "vi": "vie",
 }
+
+
+def _subtitle_extension(filename: str) -> str:
+    """Return a supported subtitle extension, defaulting to ``.srt``."""
+    suffix = PurePosixPath(filename.replace("\\", "/")).suffix.lower()
+    return suffix if suffix in _SUBTITLE_EXTENSIONS else ".srt"
+
+
+def _normalized_posix_path(path: str | Path | PurePosixPath) -> PurePosixPath:
+    """Normalize local or remote path syntax without resolving the filesystem."""
+    return PurePosixPath(posixpath.normpath(str(path).replace("\\", "/")))
 
 
 class SubtitleDownloader:
@@ -161,6 +175,43 @@ class SubtitleDownloader:
         connection: Connection | None = None,
     ) -> Path:
         """Download and save the subtitle file."""
+        folder_path = _normalized_posix_path(folder)
+
+        # Prefer the video stem and keep a nested video's relative directory.
+        if video_filename:
+            video_path = _normalized_posix_path(video_filename)
+            if video_path.is_absolute() or ".." in video_path.parts:
+                raise ValueError("video_filename must be relative to the media folder")
+            stem = video_path.stem
+            dest_folder = _normalized_posix_path(folder_path / video_path.parent)
+        else:
+            stem = "subtitles"
+            dest_folder = folder_path
+
+        lang_code = result.language.split("-")[0].lower() if result.language else "zh"
+        if lang_code in ("chi", "zho", "zh"):
+            suffix = "zh"
+        elif lang_code in ("eng", "en"):
+            suffix = "en"
+        else:
+            suffix = lang_code
+
+        extension = _subtitle_extension(result.filename)
+        dest_path = _normalized_posix_path(dest_folder / f"{stem}.{suffix}{extension}")
+        dest = Path(dest_path.as_posix())
+
+        # Connections always consume paths relative to their configured root.
+        rel_path: str | None = None
+        if connection is not None:
+            root_path = _normalized_posix_path(connection.root)
+            try:
+                relative = dest_path.relative_to(root_path)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Subtitle destination {dest_path} is outside connection root {root_path}",
+                ) from exc
+            rel_path = relative.as_posix()
+
         if result.provider == "opensubtitles":
             if self._os is None:
                 self._os = OpenSubtitlesScraper(self._os_key, self._os_user_agent)
@@ -174,31 +225,10 @@ class SubtitleDownloader:
                 self._subdl = SubDLScraper()
             data = await self._subdl.download(result.download_url)
 
-        # Determine filename: prefer matching the video file stem
-        if video_filename:
-            video_path = Path(video_filename)
-            stem = video_path.stem
-            dest_folder = folder / video_path.parent
-        else:
-            stem = "subtitles"
-            dest_folder = folder
-
-        # Extract language code for suffix
-        lang_code = result.language.split("-")[0].lower() if result.language else "zh"
-        if lang_code in ("chi", "zho", "zh"):
-            suffix = "zh"
-        elif lang_code in ("eng", "en"):
-            suffix = "en"
-        else:
-            suffix = lang_code
-
-        dest = dest_folder / f"{stem}.{suffix}.srt"
-        rel_path = dest.relative_to(folder).as_posix() if connection is not None else None
-
         if connection is not None and rel_path is not None:
             await connection.write_bytes(rel_path, data)
         else:
-            dest_folder.mkdir(parents=True, exist_ok=True)
+            dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(data)
         logger.info("Subtitle saved: %s", dest)
         return dest

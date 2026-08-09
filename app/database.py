@@ -191,9 +191,13 @@ def init_db(db_path: Path) -> Engine:
         f"sqlite:///{db_path}",
         connect_args={"check_same_thread": False},
     )
-    event.listen(engine, "connect", _set_sqlite_pragma)
-    Base.metadata.create_all(engine)
-    _migrate(engine)
+    try:
+        event.listen(engine, "connect", _set_sqlite_pragma)
+        Base.metadata.create_all(engine)
+        _migrate(engine)
+    except Exception:
+        engine.dispose()
+        raise
     logger.info("Database initialised at %s", db_path)
     return engine
 
@@ -203,12 +207,26 @@ def _migrate(engine: Engine) -> None:
     from sqlalchemy import text
 
     with engine.begin() as conn:
-        cols = [
+        media_item_columns = [
             row[1]
             for row in conn.execute(text("PRAGMA table_info(media_item)")).fetchall()
         ]
-        if "imdb_id" not in cols:
+        if "imdb_id" not in media_item_columns:
             conn.execute(text("ALTER TABLE media_item ADD COLUMN imdb_id VARCHAR(20)"))
+
+        library_columns = [
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(library)")).fetchall()
+        ]
+        if "connection_type" not in library_columns:
+            conn.execute(text(
+                "ALTER TABLE library ADD COLUMN connection_type "
+                "VARCHAR(20) NOT NULL DEFAULT 'local'"
+            ))
+        if "connection_config_encrypted" not in library_columns:
+            conn.execute(text(
+                "ALTER TABLE library ADD COLUMN connection_config_encrypted TEXT"
+            ))
 
 
 def create_session_factory(

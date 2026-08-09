@@ -135,6 +135,34 @@ def test_proxy_non_string_rejected(tmp_data_dir: Path) -> None:
         save_config({"proxy": 12345}, path=config_path)
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("subtitle_enabled", "false"),
+        ("subtitle_enabled", 1),
+        ("opensubtitles_api_key", ["secret"]),
+        ("assrt_token", ["secret"]),
+        ("subtitle_languages", ""),
+        ("subtitle_languages", ["chi"]),
+        ("opensubtitles_user_agent", "   "),
+        ("opensubtitles_user_agent", 123),
+    ],
+)
+def test_subtitle_type_validation_rejects_coercion(
+    tmp_data_dir: Path,
+    key: str,
+    value: object,
+) -> None:
+    config_path = tmp_data_dir / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({key: value}, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match=key):
+        load_config(config_path)
+
+
 # ---------------------------------------------------------------------------
 # M1-T4: Atomic write — no partial state on disk
 # ---------------------------------------------------------------------------

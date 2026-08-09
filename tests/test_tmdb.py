@@ -68,6 +68,15 @@ async def test_no_proxy_by_default() -> None:
     await scraper.aclose()
 
 
+@pytest.mark.asyncio
+async def test_socks5_proxy_constructor() -> None:
+    scraper = TmdbScraper(api_key="test-key", proxy="socks5://127.0.0.1:1080")
+    try:
+        assert scraper._proxy == "socks5://127.0.0.1:1080"
+    finally:
+        await scraper.aclose()
+
+
 # ---------------------------------------------------------------------------
 # M5-T1: Movie search hit → detail → ScrapedMeta
 # ---------------------------------------------------------------------------

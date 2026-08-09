@@ -70,6 +70,37 @@ def test_init_db_idempotent(tmp_path: Path) -> None:
         assert "app_meta" in tables
 
 
+def test_init_db_disposes_engine_when_migration_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from app import database as database_module
+
+    real_create_engine = database_module.create_engine
+    dispose_spy: MagicMock | None = None
+
+    def capture_engine(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        nonlocal dispose_spy
+        engine = real_create_engine(*args, **kwargs)  # type: ignore[arg-type]
+        dispose_spy = MagicMock(wraps=engine.dispose)
+        monkeypatch.setattr(engine, "dispose", dispose_spy)
+        return engine
+
+    def fail_migration(engine: object) -> None:
+        raise RuntimeError("migration failed")
+
+    monkeypatch.setattr(database_module, "create_engine", capture_engine)
+    monkeypatch.setattr(database_module, "_migrate", fail_migration)
+
+    with pytest.raises(RuntimeError, match="migration failed"):
+        init_db(tmp_path / "broken.db")
+
+    assert dispose_spy is not None
+    dispose_spy.assert_called_once_with()
+
+
 # ---------------------------------------------------------------------------
 # M2-T2: folder_path unique constraint
 # ---------------------------------------------------------------------------
@@ -393,5 +424,40 @@ def test_migration_adds_imdb_id_column(tmp_path: Path) -> None:
         with engine.connect() as sess:
             cols = [r[1] for r in sess.execute(text("PRAGMA table_info(media_item)"))]
         assert "imdb_id" in cols
+    finally:
+        engine.dispose()
+
+
+def test_migrate_legacy_library_connection_columns(tmp_path: Path) -> None:
+    """Remote-library columns are added without losing legacy rows."""
+    import sqlite3
+
+    db_path = tmp_path / "legacy-library.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE library ("
+        "id INTEGER PRIMARY KEY, name VARCHAR(100) NOT NULL, "
+        "path VARCHAR(500) NOT NULL UNIQUE, media_type VARCHAR(10) NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO library (id, name, path, media_type) VALUES (1, '旧媒体库', '/old', 'movie')"
+    )
+    conn.commit()
+    conn.close()
+
+    engine = init_db(db_path)
+    try:
+        with engine.connect() as db:
+            columns = {
+                row[1] for row in db.execute(text("PRAGMA table_info(library)"))
+            }
+        assert {"connection_type", "connection_config_encrypted"} <= columns
+
+        factory = create_session_factory(engine)
+        with factory() as session:
+            library = session.get(Library, 1)
+            assert library is not None
+            assert library.connection_type == "local"
+            assert library.connection_config_encrypted is None
     finally:
         engine.dispose()

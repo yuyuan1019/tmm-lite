@@ -31,7 +31,15 @@
   <div class="poster-grid">
     {% for item in items %}
     <div class="poster-card"
-         onclick="openDetail({{ item.id }}, '{{ (item.matched_title or item.parsed_title or '') | e }}', '{{ (item.matched_original_title or '') | e }}', {{ item.matched_year or 0 }}, '{{ (item.overview or '') | e }}', {{ item.rating or 0 }}, '{{ item.folder_path | e }}', '{{ item.media_type }}')"
+         onclick="openDetail(this)"
+         data-id="{{ item.id }}"
+         data-title="{{ item.matched_title or item.parsed_title or '' }}"
+         data-original="{{ item.matched_original_title or '' }}"
+         data-year="{{ item.matched_year or 0 }}"
+         data-overview="{{ item.overview or '' }}"
+         data-rating="{{ item.rating or 0 }}"
+         data-path="{{ item.folder_path }}"
+         data-media-type="{{ item.media_type }}"
          title="点击查看详情及播放路径">
       {% if item.poster_url %}
       <div class="poster-img-wrap">
@@ -107,8 +115,15 @@
 var _detailItemId = 0;
 var _detailPath = '';
 
-function openDetail(id, title, original, year, overview, rating, path, mediaType) {
-  _detailItemId = id;
+function openDetail(card) {
+  _detailItemId = Number(card.dataset.id || 0);
+  var title = card.dataset.title || '';
+  var original = card.dataset.original || '';
+  var year = card.dataset.year || '';
+  var overview = card.dataset.overview || '';
+  var rating = card.dataset.rating || '';
+  var path = card.dataset.path || '';
+  var mediaType = card.dataset.mediaType || '';
   document.getElementById('detail_title').textContent = title;
   document.getElementById('detail_original').textContent = original ? '原名: ' + original : '';
   document.getElementById('detail_year').textContent = year || '??';

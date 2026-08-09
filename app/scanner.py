@@ -12,11 +12,11 @@ import asyncio
 import logging
 import os
 import re
-from collections.abc import Coroutine, Iterable
+from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, TypeVar
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
@@ -40,6 +40,8 @@ from app.scrapers.subtitle import SubtitleDownloader
 from app.scrapers.tmdb import TmdbScraper
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -140,6 +142,14 @@ def normalize_path(path: str) -> str:
     """
     norm = os.path.normpath(path)
     return norm.replace("\\", "/")
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    """Convert a dynamic configuration value to ``int`` without escaping errors."""
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return default
 
 
 def _relative_folder(folder_path: str, library_path: str) -> str:
@@ -266,7 +276,7 @@ def _library_connection(lib: Library, enc_key: bytes | None) -> Connection:
     conn_cfg = ConnectionConfig(
         type=lib.connection_type,
         host=str(cfg.get("host", "")),
-        port=int(str(cfg.get("port", 0))) if cfg.get("port") else 0,
+        port=_safe_int(cfg.get("port")),
         username=str(cfg.get("username", "")),
         password=str(cfg.get("password", "")),
     )
@@ -507,7 +517,7 @@ class ScanRunner:
         self._subtitle: SubtitleDownloader | None = None
         self._running = False
         self._accepting = True
-        self._current_task: asyncio.Task[object] | None = None
+        self._current_task: asyncio.Task[Any] | None = None
         self._stop_requested = False
         self._progress: list[str] = []
 
@@ -583,29 +593,32 @@ class ScanRunner:
 
     def start_full_background(self) -> asyncio.Task[ScrapeLog]:
         """Start a full scan in the background; returns the Task immediately."""
-        return self._start_background(self._run_full_impl())
+        return self._start_background(self._run_full_impl)
 
     def start_rescrape_failed_background(self) -> asyncio.Task[ScrapeLog]:
         """Start a background run that re-scrapes all failed items."""
-        return self._start_background(self._rescrape_failed_impl())
+        return self._start_background(self._rescrape_failed_impl)
 
     def _start_background(
-        self, coro: Coroutine[Any, Any, ScrapeLog],
-    ) -> asyncio.Task[ScrapeLog]:
-        """Claim the mutex and run *coro* as a background task.
+        self, factory: Callable[[], Coroutine[Any, Any, T]],
+    ) -> asyncio.Task[T]:
+        """Claim the mutex and run a freshly-created coroutine in the background.
 
-        The mutex is released by the done-callback once the task unwinds.
+        Claiming happens before invoking *factory*, so a rejected start never
+        creates a coroutine that could be left un-awaited.  The done callback
+        clears ownership only while its task is still the active task.
         """
         self._claim()
+        coro: Coroutine[Any, Any, T] | None = None
         try:
+            coro = factory()
             task = asyncio.create_task(coro)
             self._current_task = task
 
-            def _done(t: asyncio.Task[object]) -> None:
-                self._release()
-                # Done-callbacks run outside the scan task's context, so
-                # _release() cannot clear _current_task itself — do it here.
-                self._current_task = None
+            def _done(t: asyncio.Task[T]) -> None:
+                if self._current_task is t:
+                    self._current_task = None
+                    self._running = False
                 if not t.cancelled():
                     exc = t.exception()
                     if exc is not None:
@@ -613,7 +626,9 @@ class ScanRunner:
 
             task.add_done_callback(_done)
             return task
-        except Exception:
+        except BaseException:
+            if coro is not None:
+                coro.close()
             self._release()
             raise
 
@@ -664,36 +679,10 @@ class ScanRunner:
     def start_rescrape_item_background(
         self, item_id: int, *, query: str | None = None, tmdb_id: int | None = None,
     ) -> asyncio.Task[MediaItem]:
-        """Like :meth:`rescrape_item` but returns immediately; runs in background.
-
-        Uses a lightweight lock check instead of the full mutex so the items
-        page UI does not freeze while the rescrape is in progress.
-        """
-        if not self._accepting:
-            raise ScanBusyError("Scanner is shutting down")
-
-        async def _run() -> MediaItem:
-            if self._running:
-                raise ScanBusyError("任务正在运行中，请稍后")
-            self._running = True
-            try:
-                return await self._rescrape_item_impl(item_id, query=query, tmdb_id=tmdb_id)
-            finally:
-                self._running = False
-
-        task = asyncio.create_task(_run())
-        self._current_task = task
-
-        def _done(t: asyncio.Task[object]) -> None:
-            self._running = False
-            self._current_task = None
-            if not t.cancelled():
-                exc = t.exception()
-                if exc is not None:
-                    logger.error("Background rescrape failed: %s", exc)
-
-        task.add_done_callback(_done)
-        return task
+        """Like :meth:`rescrape_item` but returns immediately in a claimed task."""
+        return self._start_background(
+            lambda: self._rescrape_item_impl(item_id, query=query, tmdb_id=tmdb_id)
+        )
 
     async def download_subtitle(self, item_id: int) -> Path | None:
         """Manually download subtitles for a single item.
@@ -711,11 +700,11 @@ class ScanRunner:
     def start_refresh_subtitles_background(self) -> asyncio.Task[ScrapeLog]:
         """Start a background task that downloads subtitles for all matched
         items whose title is not primarily Chinese (non-CJK matched title)."""
-        return self._start_background(self._refresh_subtitles_impl())
+        return self._start_background(self._refresh_subtitles_impl)
 
     def start_rescan_library_background(self, lib_id: int) -> asyncio.Task[ScrapeLog]:
         """Re-scan a single library in the background (re-discover + upsert)."""
-        return self._start_background(self._rescan_library_impl(lib_id))
+        return self._start_background(lambda: self._rescan_library_impl(lib_id))
 
     async def rescan_library(self, lib_id: int) -> ScrapeLog:
         """Re-scan a single library synchronously."""
@@ -1404,62 +1393,69 @@ class ScanRunner:
             sess.flush()
             log_id = log.id
 
-        for index, item in enumerate(eligible):
-            target = self._load_target(item.id)
-            if target is None:
-                continue
-            conn = _library_connection_from_target(target, self._enc_key)
-            if self._stop_requested:
-                msg = "任务已手动停止"
-                remaining = eligible[index:]
-                with self._session_factory.begin() as sess:
-                    for it in remaining:
-                        detail_lines.append(f"{it.folder_path}: {msg}")
-                failed += len(remaining)
-                self._log_progress(msg)
-                break
-            self._log_progress(f"正在下载字幕: {item.folder_path}")
-            try:
-                title = item.matched_original_title or item.matched_title or ""
-                year = item.matched_year or item.parsed_year
-                result = await self._download_subtitle_for_target(
-                    target, conn, title=title, year=year, imdb_id=item.imdb_id,
-                )
-                if result is not None:
-                    matched += 1
-                    detail_lines.append(f"字幕已下载: {item.folder_path} -> {result.name}")
-                    self._log_progress(f"字幕已下载: {item.folder_path}")
-                else:
-                    detail_lines.append(f"未找到字幕: {item.folder_path}")
-                    self._log_progress(f"未找到字幕: {item.folder_path}")
-            except asyncio.CancelledError:
-                stop_msg = "任务已手动停止" if self._stop_requested else "任务因应用关闭而取消"
-                remaining = eligible[index:]
-                with self._session_factory.begin() as sess:
-                    for it in remaining:
-                        detail_lines.append(f"{it.folder_path}: {stop_msg}")
-                failed += len(remaining)
-                self._log_progress(stop_msg)
-                raise
-            except Exception as exc:  # noqa: BLE001 (item isolation)
-                failed += 1
-                detail_lines.append(f"{item.folder_path}: {exc}")
-                self._log_progress(f"字幕下载失败: {item.folder_path}: {exc}")
-            finally:
-                await conn.aclose()
+        try:
+            for index, item in enumerate(eligible):
+                target = self._load_target(item.id)
+                if target is None:
+                    continue
+                if self._stop_requested:
+                    msg = "任务已手动停止"
+                    remaining = eligible[index:]
+                    detail_lines.extend(f"{it.folder_path}: {msg}" for it in remaining)
+                    failed += len(remaining)
+                    self._log_progress(msg)
+                    break
 
-        if log_id is not None:
-            with self._session_factory.begin() as sess:
-                existing_log = sess.get(ScrapeLog, log_id)
-                if existing_log is not None:
-                    existing_log.finished_at = datetime.now(UTC)
-                    existing_log.total = total
-                    existing_log.matched = matched
-                    existing_log.failed = failed
-                    existing_log.detail = "\n".join(detail_lines) if detail_lines else None
-        self._log_progress(
-            f"字幕刷新完成: 总计 {total} / 已下载 {matched} / 未找到或失败 {failed}"
-        )
+                conn = _library_connection_from_target(target, self._enc_key)
+                self._log_progress(f"正在下载字幕: {item.folder_path}")
+                try:
+                    title = item.matched_original_title or item.matched_title or ""
+                    year = item.matched_year or item.parsed_year
+                    result = await self._download_subtitle_for_target(
+                        target, conn, title=title, year=year, imdb_id=item.imdb_id,
+                    )
+                    if result is not None:
+                        matched += 1
+                        detail_lines.append(
+                            f"字幕已下载: {item.folder_path} -> {result.name}"
+                        )
+                        self._log_progress(f"字幕已下载: {item.folder_path}")
+                    else:
+                        failed += 1
+                        detail_lines.append(f"未找到字幕: {item.folder_path}")
+                        self._log_progress(f"未找到字幕: {item.folder_path}")
+                except asyncio.CancelledError:
+                    stop_msg = (
+                        "任务已手动停止" if self._stop_requested else "任务因应用关闭而取消"
+                    )
+                    remaining = eligible[index:]
+                    detail_lines.extend(
+                        f"{it.folder_path}: {stop_msg}" for it in remaining
+                    )
+                    failed += len(remaining)
+                    self._log_progress(stop_msg)
+                    raise
+                except Exception as exc:  # noqa: BLE001 (item isolation)
+                    failed += 1
+                    detail_lines.append(f"{item.folder_path}: {exc}")
+                    self._log_progress(f"字幕下载失败: {item.folder_path}: {exc}")
+                finally:
+                    await conn.aclose()
+        finally:
+            if log_id is not None:
+                with self._session_factory.begin() as sess:
+                    existing_log = sess.get(ScrapeLog, log_id)
+                    if existing_log is not None:
+                        existing_log.finished_at = datetime.now(UTC)
+                        existing_log.total = total
+                        existing_log.matched = matched
+                        existing_log.failed = failed
+                        existing_log.detail = (
+                            "\n".join(detail_lines) if detail_lines else None
+                        )
+            self._log_progress(
+                f"字幕刷新完成: 总计 {total} / 已下载 {matched} / 未找到或失败 {failed}"
+            )
 
         with self._session_factory() as sess:
             final_log = sess.get(ScrapeLog, log_id)
@@ -1590,14 +1586,15 @@ class ScanRunner:
         rel_folder = _relative_folder(target.folder_path, target.library_path)
         if target.is_file:
             media_folder = Path(target.folder_path).parent
-            video_filename = Path(rel_folder).name
+            video_filename = PurePosixPath(rel_folder).name
         else:
             media_folder = Path(target.folder_path)
             video_rel = await _find_video_file_async(conn, rel_folder)
             if not video_rel:
                 return None
-            prefix = rel_folder.rstrip("/") + "/"
-            video_filename = video_rel.removeprefix(prefix) if video_rel.startswith(prefix) else video_rel
+            video_filename = str(
+                PurePosixPath(video_rel).relative_to(PurePosixPath(rel_folder))
+            )
         return await self._subtitle.download(
             title=title,
             year=year,
@@ -1662,8 +1659,12 @@ def _apply_nfo_meta(item: MediaItem, meta: dict[str, object], now: datetime) -> 
             pass
     if meta.get("plot"):
         item.overview = str(meta["plot"])
-    if meta.get("genres"):
-        item.genres = ",".join(str(g) for g in meta["genres"])  # type: ignore[arg-type]
+    genres = meta.get("genres")
+    if (
+        isinstance(genres, Iterable)
+        and not isinstance(genres, (str, bytes, dict))
+    ):
+        item.genres = ",".join(str(genre) for genre in genres)
     if meta.get("tmdb_id"):
         item.source_id = str(meta["tmdb_id"])
     if meta.get("imdb_id"):

@@ -231,6 +231,15 @@ def _validate_config_values(raw: dict[str, object]) -> None:
         elif key == "scheduler_enabled":
             if not isinstance(value, bool):
                 raise ConfigError(f"scheduler_enabled 必须是布尔值: {type(value).__name__}")
+        elif key == "subtitle_enabled":
+            if not isinstance(value, bool):
+                raise ConfigError(f"subtitle_enabled 必须是布尔值: {type(value).__name__}")
+        elif key in {"opensubtitles_api_key", "assrt_token"}:
+            if not isinstance(value, str):
+                raise ConfigError(f"{key} 必须是字符串: {type(value).__name__}")
+        elif key in {"subtitle_languages", "opensubtitles_user_agent"}:
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigError(f"{key} 必须是非空字符串")
         elif key == "libraries":
             if not isinstance(value, list):
                 raise ConfigError(f"libraries 必须是列表: {type(value).__name__}")

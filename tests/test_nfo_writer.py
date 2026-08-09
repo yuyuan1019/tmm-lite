@@ -7,7 +7,13 @@ from tempfile import TemporaryDirectory
 
 from lxml import etree
 
-from app.nfo_writer import build_movie_nfo_bytes, nfo_exists, parse_nfo, write_movie_nfo, write_tvshow_nfo
+from app.nfo_writer import (
+    build_movie_nfo_bytes,
+    nfo_exists,
+    parse_nfo,
+    write_movie_nfo,
+    write_tvshow_nfo,
+)
 from app.scrapers.base import ScrapedMeta
 
 
@@ -255,7 +261,7 @@ def test_parse_nfo_real_world_with_imdb() -> None:
         '<uniqueid type="tmdb" default="true">335984</uniqueid>'
         '<uniqueid type="imdb">tt1856101</uniqueid>'
         "</movie>"
-    ).encode("utf-8")
+    ).encode()
     parsed = parse_nfo(xml)
     assert parsed is not None
     assert parsed["title"] == "银翼杀手2049"
@@ -270,10 +276,10 @@ def test_parse_nfo_real_world_with_imdb() -> None:
 def test_parse_nfo_ratings_structure() -> None:
     """Newer <ratings><rating><value> form is parsed too."""
     xml = (
-        '<movie><title>X</title>'
-        '<ratings><rating name="imdb" max="10" default="true"><value>8.1</value></rating></ratings>'
-        "</movie>"
-    ).encode("utf-8")
+        b"<movie><title>X</title>"
+        b'<ratings><rating name="imdb" max="10" default="true"><value>8.1</value></rating></ratings>'
+        b"</movie>"
+    )
     assert parse_nfo(xml) == {"title": "X", "rating": 8.1}
 
 

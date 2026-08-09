@@ -11,8 +11,10 @@ from sqlalchemy.orm import Session
 
 from app.config import AppConfig
 from app.database import (
+    AppMeta,
     Library,
     MediaItem,
+    ScrapeLog,
     create_session_factory,
     init_db,
 )
@@ -504,6 +506,83 @@ async def test_task_mutex_rejects_concurrent(tmp_path: Path) -> None:
     await task1
 
 
+@pytest.mark.asyncio
+async def test_background_rescrape_claims_before_task_is_scheduled(tmp_path: Path) -> None:
+    """A background rescrape owns the runner before control returns to the loop."""
+    h = _setup(tmp_path)
+    release = asyncio.Event()
+
+    async def blocked(*args: object, **kwargs: object) -> MediaItem:
+        await release.wait()
+        return MediaItem(
+            id=1,
+            library_id=1,
+            media_type="movie",
+            folder_path="/x",
+            status="matched",
+        )
+
+    h.runner._rescrape_item_impl = blocked  # type: ignore[method-assign]
+
+    first = h.runner.start_rescrape_item_background(1)
+    assert h.runner.is_running is True
+    with pytest.raises(ScanBusyError):
+        h.runner.start_rescrape_item_background(2)
+    assert h.runner._current_task is first
+
+    release.set()
+    await first
+    assert h.runner.is_running is False
+    assert h.runner._current_task is None
+
+
+@pytest.mark.asyncio
+async def test_rejected_background_start_does_not_create_coroutine(tmp_path: Path) -> None:
+    """A busy rejection happens before invoking the coroutine factory."""
+    h = _setup(tmp_path)
+    release = asyncio.Event()
+    factory_calls = 0
+
+    async def blocked() -> ScrapeLog:
+        await release.wait()
+        return ScrapeLog(total=0, matched=0, failed=0)
+
+    def rejected_factory() -> object:
+        nonlocal factory_calls
+        factory_calls += 1
+        return blocked()
+
+    first = h.runner._start_background(blocked)
+    with pytest.raises(ScanBusyError):
+        h.runner._start_background(rejected_factory)  # type: ignore[arg-type]
+
+    assert factory_calls == 0
+    release.set()
+    await first
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_claimed_background_rescrape(tmp_path: Path) -> None:
+    """stop() targets a rescrape task claimed synchronously by the shared starter."""
+    h = _setup(tmp_path)
+    entered = asyncio.Event()
+
+    async def blocked(*args: object, **kwargs: object) -> MediaItem:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    h.runner._rescrape_item_impl = blocked  # type: ignore[method-assign]
+    task = h.runner.start_rescrape_item_background(1)
+    await entered.wait()
+
+    assert h.runner.stop() is True
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert h.runner.is_running is False
+    assert h.runner._current_task is None
+
+
 # ---------------------------------------------------------------------------
 # M7-T12: rescrape forces re-scrape
 # ---------------------------------------------------------------------------
@@ -901,6 +980,11 @@ class _FakeConnection:
         self._root = root.rstrip("/")
         self._files = dict(files)  # absolute path -> bytes
         self.written: dict[str, bytes] = {}
+        self.close_calls = 0
+
+    @property
+    def root(self) -> str:
+        return self._root
 
     def _abs(self, path: str) -> str:
         from pathlib import PurePosixPath
@@ -956,7 +1040,7 @@ class _FakeConnection:
         return False
 
     async def aclose(self) -> None:
-        pass
+        self.close_calls += 1
 
 
 @pytest.mark.asyncio
@@ -1537,10 +1621,6 @@ async def test_discover_deep_movie_no_year(tmp_path: Path) -> None:
 # Manual stop (concurrency)
 # ---------------------------------------------------------------------------
 
-async def _hang_search(*args: object, **kwargs: object) -> None:
-    await asyncio.Event().wait()  # never completes → cancellable
-
-
 @pytest.mark.asyncio
 async def test_stop_background_scan(tmp_path: Path) -> None:
     """stop() cancels the running scan and marks remaining items as stopped."""
@@ -1552,12 +1632,18 @@ async def test_stop_background_scan(tmp_path: Path) -> None:
 
     h = _setup(tmp_path)
     runner = h.runner; tmdb = h.tmdb
-    tmdb.search_and_fetch.side_effect = _hang_search
+    entered = asyncio.Event()
+
+    async def hang_after_entering(*args: object, **kwargs: object) -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    tmdb.search_and_fetch.side_effect = hang_after_entering
     with h.session() as sess:
         _add_library(sess, "Movies", str(movies_dir), "movie")
 
     task = runner.start_full_background()
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(entered.wait(), timeout=5.0)
     assert runner.is_running
 
     assert runner.stop() is True
@@ -1588,12 +1674,18 @@ async def test_scan_can_restart_after_stop(tmp_path: Path) -> None:
 
     h = _setup(tmp_path)
     runner = h.runner; tmdb = h.tmdb
-    tmdb.search_and_fetch.side_effect = _hang_search
+    entered = asyncio.Event()
+
+    async def hang_after_entering(*args: object, **kwargs: object) -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    tmdb.search_and_fetch.side_effect = hang_after_entering
     with h.session() as sess:
         _add_library(sess, "Movies", str(movies_dir), "movie")
 
     task = runner.start_full_background()
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(entered.wait(), timeout=5.0)
     assert runner.is_running
     assert runner.stop() is True
     with pytest.raises(asyncio.CancelledError):
@@ -1619,12 +1711,18 @@ async def test_stop_awaited_run_full(tmp_path: Path) -> None:
 
     h = _setup(tmp_path)
     runner = h.runner; tmdb = h.tmdb
-    tmdb.search_and_fetch.side_effect = _hang_search
+    entered = asyncio.Event()
+
+    async def hang_after_entering(*args: object, **kwargs: object) -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    tmdb.search_and_fetch.side_effect = hang_after_entering
     with h.session() as sess:
         _add_library(sess, "Movies", str(movies_dir), "movie")
 
     task = asyncio.create_task(runner.run_full())  # mirrors the scheduler path
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(entered.wait(), timeout=5.0)
     assert runner.is_running
     assert runner.stop() is True
 
@@ -1900,3 +1998,601 @@ def test_detect_subtitle_summary() -> None:
     assert detect_subtitle_summary(["movie.zh.srt"]) == "中文"
     assert detect_subtitle_summary(["movie.eng.srt"]) == "有字幕(非中文)"
     assert detect_subtitle_summary(["movie.srt"]) == "有字幕(非中文)"
+
+
+# ---------------------------------------------------------------------------
+# Hardening: per-library rescan state machine
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_rescan_library_rediscovers_and_scrapes_items(tmp_path: Path) -> None:
+    movies_dir = tmp_path / "movies"
+    folder = movies_dir / "Film (2020)"
+    folder.mkdir(parents=True)
+    (folder / "video.mkv").write_bytes(b"video")
+
+    h = _setup(tmp_path)
+    h.tmdb.search_and_fetch.return_value = _mock_meta(
+        title="Film", poster_url=None, backdrop_url=None,
+    )
+    with h.session() as sess:
+        lib = _add_library(sess, "Movies", str(movies_dir), "movie")
+        lib_id = lib.id
+
+    log = await h.runner.rescan_library(lib_id)
+
+    assert (log.total, log.matched, log.failed) == (1, 1, 0)
+    assert "发现 1 个条目" in (log.detail or "")
+    with h.session() as sess:
+        item = sess.query(MediaItem).one()
+        assert item.status == "matched"
+        assert item.matched_title == "Film"
+    assert (folder / "movie.nfo").exists()
+
+
+@pytest.mark.asyncio
+async def test_rescan_library_loads_existing_nfo_metadata(tmp_path: Path) -> None:
+    movies_dir = tmp_path / "movies"
+    folder = movies_dir / "Bundled (2020)"
+    folder.mkdir(parents=True)
+    (folder / "video.mkv").write_bytes(b"video")
+    (folder / "movie.nfo").write_text(
+        "<movie><title>Bundled Title</title><originaltitle>Original</originaltitle>"
+        "<year>2020</year><rating>8.5</rating><plot>Plot</plot>"
+        "<genre>Drama</genre><uniqueid type='tmdb'>42</uniqueid>"
+        "<uniqueid type='imdb'>tt42</uniqueid></movie>",
+        encoding="utf-8",
+    )
+
+    h = _setup(tmp_path)
+    with h.session() as sess:
+        lib = _add_library(sess, "Movies", str(movies_dir), "movie")
+        lib_id = lib.id
+
+    log = await h.runner.rescan_library(lib_id)
+
+    assert (log.total, log.matched, log.failed) == (1, 0, 0)
+    with h.session() as sess:
+        item = sess.query(MediaItem).one()
+        assert item.status == "matched"
+        assert item.source == "nfo"
+        assert item.matched_title == "Bundled Title"
+        assert item.genres == "Drama"
+        assert item.imdb_id == "tt42"
+    h.tmdb.search_and_fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rescan_library_records_inaccessible_connection(tmp_path: Path) -> None:
+    h = _setup(tmp_path)
+    missing_root = tmp_path / "missing"
+    with h.session() as sess:
+        lib = _add_library(sess, "Offline", str(missing_root), "movie")
+        lib_id = lib.id
+
+    log = await h.runner.rescan_library(lib_id)
+
+    assert (log.total, log.matched, log.failed) == (0, 0, 1)
+    assert f"库重新扫描失败: {missing_root}" in (log.detail or "")
+    assert log.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_rescan_library_missing_id_finalizes_log(tmp_path: Path) -> None:
+    from app.exceptions import ItemNotFoundError
+
+    h = _setup(tmp_path)
+    with pytest.raises(ItemNotFoundError, match="Library 999"):
+        await h.runner.rescan_library(999)
+
+    assert h.runner.is_running is False
+    with h.session() as sess:
+        log = sess.query(ScrapeLog).one()
+        assert log.finished_at is not None
+        assert (log.total, log.matched, log.failed) == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_rescan_library_isolates_item_scrape_failure(tmp_path: Path) -> None:
+    movies_dir = tmp_path / "movies"
+    folder = movies_dir / "Broken (2020)"
+    folder.mkdir(parents=True)
+    (folder / "video.mkv").write_bytes(b"video")
+
+    h = _setup(tmp_path)
+    h.tmdb.search_and_fetch.side_effect = RuntimeError("TMDB unavailable")
+    with h.session() as sess:
+        lib = _add_library(sess, "Movies", str(movies_dir), "movie")
+        lib_id = lib.id
+
+    log = await h.runner.rescan_library(lib_id)
+
+    assert (log.total, log.matched, log.failed) == (1, 0, 1)
+    assert "TMDB unavailable" in (log.detail or "")
+    with h.session() as sess:
+        item = sess.query(MediaItem).one()
+        assert item.status == "failed"
+        assert item.error_message == "TMDB unavailable"
+
+
+@pytest.mark.asyncio
+async def test_background_rescan_rejects_busy_start(tmp_path: Path) -> None:
+    h = _setup(tmp_path)
+    release = asyncio.Event()
+
+    async def blocked(lib_id: int) -> ScrapeLog:
+        await release.wait()
+        return ScrapeLog(total=lib_id, matched=0, failed=0)
+
+    h.runner._rescan_library_impl = blocked  # type: ignore[method-assign]
+    task = h.runner.start_rescan_library_background(1)
+    with pytest.raises(ScanBusyError):
+        h.runner.start_rescan_library_background(2)
+
+    release.set()
+    assert (await task).total == 1
+    assert h.runner._current_task is None
+
+
+# ---------------------------------------------------------------------------
+# Hardening: subtitle refresh branches and path hand-off
+# ---------------------------------------------------------------------------
+
+def _add_matched_item(
+    sess: Session,
+    lib: Library,
+    folder_path: str,
+    title: str,
+    *,
+    original_title: str | None = None,
+) -> int:
+    item = MediaItem(
+        library_id=lib.id,
+        media_type=lib.media_type,
+        folder_path=folder_path,
+        parsed_title=title,
+        parsed_year=2020,
+        matched_title=title,
+        matched_original_title=original_title,
+        matched_year=2020,
+        status="matched",
+    )
+    sess.add(item)
+    sess.commit()
+    return item.id
+
+
+@pytest.mark.asyncio
+async def test_refresh_subtitles_rejects_disabled_downloader(tmp_path: Path) -> None:
+    from app.exceptions import ScrapeError
+
+    h = _setup(tmp_path, _make_config(subtitle_enabled=False))
+
+    with pytest.raises(ScrapeError, match="字幕功能未启用"):
+        await h.runner._refresh_subtitles_impl()
+
+
+@pytest.mark.asyncio
+async def test_refresh_subtitles_skips_empty_and_chinese_titles(tmp_path: Path) -> None:
+    h = _setup(tmp_path, _make_config(subtitle_enabled=True))
+    subtitle = AsyncMock()
+    h.runner.set_subtitle_downloader(subtitle)  # type: ignore[arg-type]
+    with h.session() as sess:
+        lib = _add_library(sess, "Remote", "/movies", "movie")
+        _add_matched_item(sess, lib, "/movies/Empty", "")
+        _add_matched_item(sess, lib, "/movies/Chinese", "流浪地球")
+
+    log = await h.runner._refresh_subtitles_impl()
+
+    assert (log.total, log.matched, log.failed) == (0, 0, 0)
+    assert log.detail is None
+    subtitle.download.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_refresh_subtitles_isolates_results_and_closes_connections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import scanner as scanner_mod
+
+    h = _setup(tmp_path, _make_config(subtitle_enabled=True))
+    subtitle = AsyncMock()
+
+    async def download(**kwargs: object) -> Path:
+        if kwargs["title"] == "Error":
+            raise RuntimeError("provider failed")
+        return Path("/saved/video.zh.srt")
+
+    subtitle.download.side_effect = download
+    h.runner.set_subtitle_downloader(subtitle)  # type: ignore[arg-type]
+
+    with h.session() as sess:
+        lib = _add_library(sess, "Remote", "/movies", "movie")
+        _add_matched_item(sess, lib, "/movies/Success", "Success")
+        _add_matched_item(sess, lib, "/movies/NoVideo", "No Video")
+        _add_matched_item(sess, lib, "/movies/Error", "Error")
+
+    files = {
+        "/movies/Success/video.mkv": b"video",
+        "/movies/Error/video.mkv": b"video",
+    }
+    connections: list[_FakeConnection] = []
+
+    def connection_for_target(*args: object) -> _FakeConnection:
+        conn = _FakeConnection("/movies", files)
+        connections.append(conn)
+        return conn
+
+    monkeypatch.setattr(scanner_mod, "_library_connection_from_target", connection_for_target)
+
+    log = await h.runner._refresh_subtitles_impl()
+
+    assert (log.total, log.matched, log.failed) == (3, 1, 2)
+    assert "字幕已下载: /movies/Success" in (log.detail or "")
+    assert "未找到字幕: /movies/NoVideo" in (log.detail or "")
+    assert "/movies/Error: provider failed" in (log.detail or "")
+    assert len(connections) == 3
+    assert all(conn.close_calls == 1 for conn in connections)
+    assert subtitle.download.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_refresh_subtitles_cancellation_finalizes_log_and_closes_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import scanner as scanner_mod
+
+    h = _setup(tmp_path, _make_config(subtitle_enabled=True))
+    entered = asyncio.Event()
+    subtitle = AsyncMock()
+
+    async def blocked_download(**kwargs: object) -> Path:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    subtitle.download.side_effect = blocked_download
+    h.runner.set_subtitle_downloader(subtitle)  # type: ignore[arg-type]
+    with h.session() as sess:
+        lib = _add_library(sess, "Remote", "/movies", "movie")
+        _add_matched_item(sess, lib, "/movies/Film", "Film")
+
+    conn = _FakeConnection("/movies", {"/movies/Film/video.mkv": b"video"})
+    monkeypatch.setattr(
+        scanner_mod,
+        "_library_connection_from_target",
+        lambda *args: conn,
+    )
+
+    task = h.runner.start_refresh_subtitles_background()
+    await entered.wait()
+    assert h.runner.stop() is True
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert conn.close_calls == 1
+    assert h.runner.is_running is False
+    with h.session() as sess:
+        log = sess.query(ScrapeLog).one()
+        assert log.finished_at is not None
+        assert (log.total, log.matched, log.failed) == (1, 0, 1)
+        assert "任务已手动停止" in (log.detail or "")
+
+
+@pytest.mark.asyncio
+async def test_subtitle_target_preserves_nested_remote_video_path(tmp_path: Path) -> None:
+    from app.scanner import ScrapeTarget
+
+    h = _setup(tmp_path, _make_config(subtitle_enabled=True))
+    subtitle = AsyncMock()
+    subtitle.download.return_value = Path("/nas/movies/Film/Disc/video.zh.ass")
+    h.runner.set_subtitle_downloader(subtitle)  # type: ignore[arg-type]
+    target = ScrapeTarget(
+        id=1,
+        library_id=1,
+        library_path="/nas/movies",
+        connection_type="ssh",
+        connection_config_encrypted=None,
+        folder_path="/nas/movies/Film",
+        media_type="movie",
+        parsed_title="Film",
+        parsed_year=2020,
+        status="matched",
+    )
+    conn = _FakeConnection(
+        "/nas/movies",
+        {"/nas/movies/Film/Disc/video.mkv": b"video"},
+    )
+
+    result = await h.runner._download_subtitle_for_target(
+        target,
+        conn,  # type: ignore[arg-type]
+        title="Film",
+        year=2020,
+    )
+
+    assert result == Path("/nas/movies/Film/Disc/video.zh.ass")
+    kwargs = subtitle.download.await_args.kwargs
+    assert kwargs["media_folder"].as_posix() == "/nas/movies/Film"
+    assert kwargs["video_filename"] == "Disc/video.mkv"
+    assert kwargs["connection"] is conn
+
+
+# ---------------------------------------------------------------------------
+# Hardening: helpers and malformed dynamic values
+# ---------------------------------------------------------------------------
+
+def test_apply_nfo_meta_ignores_bad_numbers_and_non_iterable_genres() -> None:
+    from datetime import UTC, datetime
+
+    from app.scanner import _apply_nfo_meta
+
+    item = MediaItem(
+        library_id=1,
+        media_type="movie",
+        folder_path="/movies/Film",
+        status="pending",
+    )
+    now = datetime.now(UTC)
+
+    _apply_nfo_meta(
+        item,
+        {
+            "title": "Film",
+            "year": "not-a-year",
+            "rating": object(),
+            "genres": 42,
+            "plot": "Plot",
+        },
+        now,
+    )
+
+    assert item.matched_title == "Film"
+    assert item.matched_year is None
+    assert item.rating is None
+    assert item.genres is None
+    assert item.overview == "Plot"
+    assert item.status == "matched"
+    assert item.last_scraped_at == now
+
+
+def test_ignored_paths_round_trip_is_sorted_and_filters_blanks(tmp_path: Path) -> None:
+    from app.scanner import _ignored_paths, _set_ignored_paths
+
+    h = _setup(tmp_path)
+    with h.factory.begin() as sess:
+        _set_ignored_paths(sess, {"/z", "/a"})
+    with h.session() as sess:
+        meta = sess.get(AppMeta, "ignored_paths")
+        assert meta is not None
+        assert meta.value == "/a\n/z"
+        meta.value += "\n\n"
+        sess.commit()
+    with h.session() as sess:
+        assert _ignored_paths(sess) == {"/a", "/z"}
+
+
+def test_relative_folder_rejects_path_outside_library() -> None:
+    from app.scanner import _relative_folder
+
+    with pytest.raises(ValueError):
+        _relative_folder("/elsewhere/Film", "/movies")
+
+
+def test_library_connection_invalid_encrypted_port_uses_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import scanner as scanner_mod
+    from app.crypto import encrypt_dict, load_or_create_key
+
+    key = load_or_create_key(tmp_path)
+    encrypted = encrypt_dict(
+        {"host": "nas", "port": "not-a-port", "username": "u", "password": "p"},
+        key,
+    )
+    lib = Library(
+        name="Remote",
+        path="/movies",
+        media_type="movie",
+        connection_type="ssh",
+        connection_config_encrypted=encrypted,
+    )
+    sentinel = MagicMock()
+    captured: list[object] = []
+
+    def fake_create(config: object, root: str) -> object:
+        captured.append(config)
+        assert root == "/movies"
+        return sentinel
+
+    monkeypatch.setattr(scanner_mod, "create_connection", fake_create)
+
+    assert scanner_mod._library_connection(lib, key) is sentinel
+    assert captured[0].port == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_deep_movie_connection_error_returns_false() -> None:
+    from app.scanner import _looks_like_deep_movie
+
+    conn = AsyncMock()
+    conn.contains_video.side_effect = OSError("offline")
+
+    assert await _looks_like_deep_movie(
+        conn,  # type: ignore[arg-type]
+        "Film (2020)",
+        ["Disc"],
+    ) is False
+
+
+def test_persist_result_handles_missing_and_existing_nfo_marker(tmp_path: Path) -> None:
+    from app.scanner import ExistingNfoMatched, _persist_result
+
+    h = _setup(tmp_path)
+    with h.session() as sess:
+        lib = _add_library(sess, "Movies", str(tmp_path / "movies"), "movie")
+        item_id = _add_item(sess, lib, str(tmp_path / "movies" / "Film"), "Film", 2020)
+        item = sess.get(MediaItem, item_id)
+        assert item is not None
+        item.status = "failed"
+        item.error_message = "old error"
+        sess.commit()
+
+    with h.factory.begin() as sess:
+        _persist_result(sess, 999, ExistingNfoMatched())
+        _persist_result(sess, item_id, ExistingNfoMatched())
+
+    with h.session() as sess:
+        item = sess.get(MediaItem, item_id)
+        assert item is not None
+        assert item.status == "matched"
+        assert item.error_message is None
+
+
+def test_scanner_filesystem_helpers_tolerate_io_errors() -> None:
+    from app.scanner import find_video_file
+
+    folder = MagicMock(spec=Path)
+    folder.iterdir.side_effect = OSError("offline")
+
+    assert find_video_file(folder) is None  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_connection_helpers_return_safe_results_after_io_errors() -> None:
+    from app.scanner import (
+        _detect_subtitle_summary_async,
+        _find_video_file_async,
+        _nfo_exists_async,
+        _read_nfo_meta_async,
+    )
+
+    conn = AsyncMock()
+    conn.exists.side_effect = OSError("offline")
+    conn.read_bytes.side_effect = RuntimeError("bad NFO")
+    assert await _nfo_exists_async(conn, "Film", "movie") is False
+    assert await _read_nfo_meta_async(conn, "Film", "movie") is None
+
+    conn.reset_mock()
+    conn.list_dir.side_effect = OSError("offline")
+    assert await _find_video_file_async(conn, "Film") is None
+    assert await _detect_subtitle_summary_async(conn, "Film/video.mkv") is None
+    conn.list_dir.assert_awaited_with("Film")
+
+
+@pytest.mark.asyncio
+async def test_find_video_file_skips_broken_entry_and_keeps_searching() -> None:
+    from app.scanner import _find_video_file_async
+
+    conn = AsyncMock()
+    conn.list_dir.return_value = ["broken", "video.mkv"]
+    conn.is_file.side_effect = [OSError("bad entry"), True]
+
+    assert await _find_video_file_async(conn, "Film") == "Film/video.mkv"
+
+
+@pytest.mark.asyncio
+async def test_discovery_skips_entry_stat_error() -> None:
+    from app.scanner import _discover_folders
+
+    conn = AsyncMock()
+    conn.list_dir.return_value = ["broken.mkv"]
+    conn.is_file.side_effect = OSError("bad stat")
+    lib = Library(path="/movies", media_type="movie")
+
+    assert await _discover_folders(conn, lib) == set()
+
+
+def test_subtitle_and_episode_classification_edge_cases() -> None:
+    from app.scanner import _looks_like_episode_container, detect_subtitle_summary
+
+    assert detect_subtitle_summary(["电影.繁体中文.srt"]) == "繁体中文"
+    assert detect_subtitle_summary(["电影.srt"]) == "中文"
+    assert _looks_like_episode_container("Show", []) is False
+    assert _looks_like_episode_container("1080p", ["Extras"]) is False
+    assert _looks_like_episode_container("Show", ["Bonus S01 material"]) is True
+
+
+@pytest.mark.asyncio
+async def test_rescan_library_marks_unparseable_existing_nfo_without_tmdb(
+    tmp_path: Path,
+) -> None:
+    movies_dir = tmp_path / "movies"
+    folder = movies_dir / "Bundled (2020)"
+    folder.mkdir(parents=True)
+    (folder / "video.mkv").write_bytes(b"video")
+    (folder / "movie.nfo").write_text("<movie/>", encoding="utf-8")
+
+    h = _setup(tmp_path)
+    with h.session() as sess:
+        lib = _add_library(sess, "Movies", str(movies_dir), "movie")
+        lib_id = lib.id
+
+    log = await h.runner.rescan_library(lib_id)
+
+    assert (log.total, log.matched, log.failed) == (1, 1, 0)
+    with h.session() as sess:
+        item = sess.query(MediaItem).one()
+        assert item.status == "matched"
+        assert item.error_message is None
+    h.tmdb.search_and_fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_manual_subtitle_failure_is_logged_and_connection_released(tmp_path: Path) -> None:
+    movies_dir = tmp_path / "movies"
+    folder = movies_dir / "Film (2020)"
+    folder.mkdir(parents=True)
+    (folder / "video.mkv").write_bytes(b"video")
+
+    h = _make_subtitle_runner(tmp_path, [(movies_dir, "movie")])
+    subtitle = h.runner._subtitle
+    assert subtitle is not None
+    subtitle.download.side_effect = RuntimeError("provider offline")  # type: ignore[attr-defined]
+    with h.session() as sess:
+        lib = sess.query(Library).one()
+        item_id = _add_item(sess, lib, str(folder), "Film", 2020)
+
+    with pytest.raises(RuntimeError, match="provider offline"):
+        await h.runner.download_subtitle(item_id)
+
+    assert h.runner.is_running is False
+    with h.session() as sess:
+        log = sess.query(ScrapeLog).one()
+        assert (log.total, log.matched, log.failed) == (1, 0, 1)
+        assert log.finished_at is not None
+        assert "provider offline" in (log.detail or "")
+
+
+@pytest.mark.asyncio
+async def test_background_rescrape_failed_stops_after_auth_error(tmp_path: Path) -> None:
+    movies_dir = tmp_path / "movies"
+    first = movies_dir / "First (2020)"
+    second = movies_dir / "Second (2021)"
+    for folder in (first, second):
+        folder.mkdir(parents=True)
+        (folder / "video.mkv").write_bytes(b"video")
+
+    h = _setup(tmp_path)
+    h.tmdb.search_and_fetch.side_effect = TmdbAuthError("invalid key")
+    with h.session() as sess:
+        lib = _add_library(sess, "Movies", str(movies_dir), "movie")
+        ids = [
+            _add_item(sess, lib, str(first), "First", 2020),
+            _add_item(sess, lib, str(second), "Second", 2021),
+        ]
+        for item_id in ids:
+            item = sess.get(MediaItem, item_id)
+            assert item is not None
+            item.status = "failed"
+        sess.commit()
+
+    log = await h.runner.start_rescrape_failed_background()
+
+    assert (log.total, log.matched, log.failed) == (2, 0, 2)
+    assert "invalid key" in (log.detail or "")
+    assert h.tmdb.search_and_fetch.await_count == 1
+    with h.session() as sess:
+        items = sess.query(MediaItem).order_by(MediaItem.id).all()
+        assert all(item.status == "failed" for item in items)
+        assert all(item.error_message == "invalid key" for item in items)
