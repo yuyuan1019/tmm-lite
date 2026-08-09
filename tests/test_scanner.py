@@ -2046,6 +2046,32 @@ def test_detect_subtitle_summary() -> None:
     assert detect_subtitle_summary(["movie.srt"]) == "有字幕(非中文)"
 
 
+@pytest.mark.asyncio
+async def test_find_fake_chinese_subtitles_detects_and_lists() -> None:
+    from app.scanner import _find_fake_chinese_subtitles
+
+    simplified = "这是简体中文字幕正文。" * 5
+    traditional = "這是繁體中文字幕正文。" * 5
+    english = "This is an English subtitle only." * 5
+    files = {
+        "/movies/Film (2020)/movie.zh.srt": english.encode(),
+        "/movies/Film (2020)/movie.chs.ass": simplified.encode(),
+        "/movies/Film (2020)/movie.cht.srt": traditional.encode(),
+        "/movies/Film (2020)/movie.eng.srt": english.encode(),
+        "/movies/Film (2020)/movie.mkv": b"video",
+    }
+    conn = _FakeConnection("/movies", files)
+
+    fake = await _find_fake_chinese_subtitles(
+        conn, "Film (2020)", ["zh-cn"],
+    )
+
+    # .zh.srt claims Chinese but is English; .cht.srt is traditional when
+    # simplified is requested. chs.ass (simplified) and eng (not claiming
+    # Chinese) stay untouched.
+    assert set(fake) == {"movie.zh.srt", "movie.cht.srt"}
+
+
 # ---------------------------------------------------------------------------
 # Hardening: per-library rescan state machine
 # ---------------------------------------------------------------------------
@@ -2280,6 +2306,40 @@ async def test_refresh_subtitles_isolates_results_and_closes_connections(
     assert len(connections) == 3
     assert all(conn.close_calls == 1 for conn in connections)
     assert subtitle.download.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_refresh_subtitles_reports_fake_chinese_subtitles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refresh reports subtitles claiming Chinese whose content is not."""
+    from app import scanner as scanner_mod
+
+    h = _setup(tmp_path, _make_config(subtitle_enabled=True))
+    subtitle = AsyncMock()
+    subtitle.download.return_value = Path("/saved/video.zh.srt")
+    h.runner.set_subtitle_downloader(subtitle)  # type: ignore[arg-type]
+    with h.session() as sess:
+        lib = _add_library(sess, "Remote", "/movies", "movie")
+        _add_matched_item(sess, lib, "/movies/Film", "Film")
+
+    english = "This is an English subtitle only." * 5
+    files = {
+        "/movies/Film/video.mkv": b"video",
+        "/movies/Film/movie.zh.srt": english.encode(),
+    }
+    conn = _FakeConnection("/movies", files)
+    monkeypatch.setattr(
+        scanner_mod, "_library_connection_from_target", lambda *args: conn,
+    )
+
+    log = await h.runner._refresh_subtitles_impl()
+
+    # The fake .zh.srt is detected and reported (not deleted), and a fresh
+    # download was attempted — the new file overwrites the same-named fake.
+    assert "/movies/Film/movie.zh.srt" in conn._files
+    assert "发现虚假中文字幕" in (log.detail or "")
+    subtitle.download.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -248,6 +248,66 @@ async def _detect_subtitle_summary_async(conn: Connection, rel: str) -> str | No
     return detect_subtitle_summary(names)
 
 
+def _subtitle_claims_chinese(filename: str) -> bool:
+    """Return whether a subtitle filename claims to be Chinese.
+
+    Matches the same markers ``detect_subtitle_summary`` uses for its
+    "中文" classification (zh / zho / chi codes, 简体/繁体 words, and
+    simplified/traditional codes).
+    """
+    low = filename.lower()
+    if _RE_CJK.search(filename):
+        return True
+    if any(m in low for m in ("zh-hans", "zh_hans", "zh-cn", "zh_cn", "chs", "简体", "简中")):
+        return True
+    if any(m in low for m in ("zh-hant", "zh_hant", "zh-tw", "zh_tw", "cht", "繁体", "繁中")):
+        return True
+    return re.search(r"(?:^|[._\-])zh(?:[._\-]|$)", low) is not None or "zho" in low or "chi" in low
+
+
+async def _find_fake_chinese_subtitles(
+    conn: Connection,
+    rel_folder: str,
+    preferred_languages: list[str],
+) -> list[str]:
+    """Find subtitle files that *claim* to be Chinese but are not usable.
+
+    A subtitle is considered fake when its filename claims Chinese (zh/chs/
+    简体 etc.) but the content check rejects it: no Chinese text at all, or
+    the wrong simplified/traditional variant. Returns the list of relative
+    filenames (basenames within *rel_folder*) to delete.
+    """
+    from app.scrapers.subtitle_language import (
+        chinese_variant,
+        contains_chinese_text,
+        preferred_variant,
+    )
+
+    try:
+        names = await conn.list_dir(rel_folder)
+    except OSError:
+        return []
+    pref = preferred_variant(preferred_languages)
+    fake: list[str] = []
+    for name in names:
+        if Path(name).suffix.lower() not in _SUBTITLE_EXTS:
+            continue
+        if not _subtitle_claims_chinese(name):
+            continue
+        try:
+            data = await conn.read_bytes(str(PurePosixPath(rel_folder) / name))
+        except OSError:
+            continue
+        if not contains_chinese_text(data):
+            fake.append(name)
+            continue
+        if pref is not None:
+            variant = chinese_variant(data)
+            if variant is not None and variant != pref:
+                fake.append(name)
+    return fake
+
+
 def _library_connection(lib: Library, enc_key: bytes | None) -> Connection:
     """Create a :class:`Connection` for *lib*.
 
@@ -1415,6 +1475,19 @@ class ScanRunner:
                 conn = _library_connection_from_target(target, self._enc_key)
                 self._log_progress(f"正在下载字幕: {item.folder_path}")
                 try:
+                    # Detect "fake" Chinese subtitles (claim Chinese in the
+                    # filename but the content is not Chinese, or is the wrong
+                    # variant). They are reported in the live log, then a fresh
+                    # download is attempted — the new file either overwrites the
+                    # same-named fake or lands alongside differently-named ones.
+                    rel_folder = _relative_folder(target.folder_path, target.library_path)
+                    fake = await _find_fake_chinese_subtitles(
+                        conn, rel_folder, self._subtitle._languages
+                    )
+                    for name in fake:
+                        detail_lines.append(f"发现虚假中文字幕: {item.folder_path} -> {name}")
+                        self._log_progress(f"发现虚假中文字幕: {item.folder_path} -> {name}")
+
                     title = item.matched_original_title or item.matched_title or ""
                     year = item.matched_year or item.parsed_year
                     result = await self._download_subtitle_for_target(
