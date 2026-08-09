@@ -1313,6 +1313,7 @@ class ScanRunner:
             log_id = log.id
 
         conn = _library_connection_from_target(target, self._enc_key)
+        self._log_progress(f"正在下载字幕: {target.folder_path}")
         try:
             result = await self._download_subtitle_for_target(
                 target, conn, title=title, year=year, imdb_id=imdb_id,
@@ -1320,12 +1321,15 @@ class ScanRunner:
             if result is not None:
                 matched = 1
                 detail = f"手动字幕: {target.folder_path}: {result.name}"
+                self._log_progress(f"字幕已下载: {target.folder_path} -> {result.name}")
             else:
                 detail = f"手动字幕: {target.folder_path}: 未找到可用字幕"
+                self._log_progress(f"未找到可用字幕: {target.folder_path}")
             return result
         except Exception as exc:
             failed = 1
             detail = f"手动字幕: {target.folder_path}: {exc}"
+            self._log_progress(f"字幕下载失败: {target.folder_path}: {exc}")
             raise
         finally:
             await conn.aclose()

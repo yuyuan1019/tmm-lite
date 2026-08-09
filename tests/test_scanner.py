@@ -1452,6 +1452,27 @@ async def test_download_subtitle_folder_item(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_download_subtitle_emits_live_progress(tmp_path: Path) -> None:
+    """Manual subtitle download must surface in the live-progress log."""
+    movies_dir = tmp_path / "movies"
+    d = movies_dir / "Film (2020)"
+    d.mkdir(parents=True)
+    (d / "movie.mkv").write_text("x")
+
+    h = _make_subtitle_runner(tmp_path, [(movies_dir, "movie")])
+    with h.session() as sess:
+        lib = sess.query(Library).one()
+        item_id = _add_item(sess, lib, str(movies_dir / "Film (2020)"), "Film", 2020)
+
+    result = await h.runner.download_subtitle(item_id)
+
+    assert result == Path("/fake/subtitle.srt")
+    lines = "\n".join(h.runner.progress_lines())
+    assert "正在下载字幕" in lines
+    assert "字幕已下载" in lines
+
+
+@pytest.mark.asyncio
 async def test_download_subtitle_file_item(tmp_path: Path) -> None:
     """Manual subtitle for a loose-file item uses the file's parent + name."""
     movies_dir = tmp_path / "movies"
