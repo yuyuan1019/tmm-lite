@@ -112,6 +112,60 @@ def chinese_text_score(data: bytes) -> int:
     )
 
 
+# High-frequency character pairs that differ between simplified and
+# traditional Chinese. Used to detect the variant of a subtitle's *content*
+# (rather than trusting filename/provider labels). Characters are paired by
+# position: _SIMPLIFIED_ONLY_CHARS[i] <-> _TRADITIONAL_ONLY_CHARS[i].
+_SIMPLIFIED_ONLY_CHARS = frozenset(
+    "这说们时会为还没来么个过发现对让关问长门开车风东马鸟鱼龙电书"
+    "亲爱欢学习认识语言话读讲请谢钱银铁钟间闻阅闭上闪见样种边头机应"
+)
+_TRADITIONAL_ONLY_CHARS = frozenset(
+    "這說們時會為還沒來麼個過發現對讓關問長門開車風東馬鳥魚龍電書"
+    "親愛歡學習認識語言話讀講請謝錢銀鐵鐘間聞閱閉上閃見樣種邊頭機應"
+)
+
+
+def chinese_variant(data: bytes) -> str | None:
+    """Detect the simplified/traditional variant of a Chinese subtitle payload.
+
+    Returns ``"simplified"``, ``"traditional"``, or ``None`` when the text is
+    too ambiguous (or not Chinese) to decide. The variant is read from the
+    decoded *content*, not from filename or provider labels.
+    """
+    best_variant: str | None = None
+    best_total = 0
+    for text in _decode_subtitle_candidates(data):
+        simplified = sum(text.count(char) for char in _SIMPLIFIED_ONLY_CHARS)
+        traditional = sum(text.count(char) for char in _TRADITIONAL_ONLY_CHARS)
+        total = simplified + traditional
+        if simplified > traditional:
+            variant: str | None = "simplified"
+        elif traditional > simplified:
+            variant = "traditional"
+        else:
+            variant = None
+        if variant is not None and total > best_total:
+            best_total = total
+            best_variant = variant
+    return best_variant
+
+
+def preferred_variant(languages: list[str]) -> str | None:
+    """Return the requested Chinese variant (``"simplified"``/``"traditional"``).
+
+    Defaults to simplified unless the first configured language explicitly
+    requests traditional (``zh-tw`` / ``zh-hant``). Returns ``None`` when the
+    language list does not ask for Chinese at all.
+    """
+    if not expects_chinese(languages):
+        return None
+    first = languages[0].strip().lower().replace("_", "-") if languages else "zh-cn"
+    if first in {"zh-tw", "zh-hant"}:
+        return "traditional"
+    return "simplified"
+
+
 def contains_chinese_text(data: bytes) -> bool:
     """Return whether a subtitle payload contains substantial Chinese text."""
     return chinese_text_score(data) > 0

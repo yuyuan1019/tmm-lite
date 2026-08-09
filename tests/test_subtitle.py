@@ -20,9 +20,11 @@ from app.scrapers.subtitle import (
     _subtitle_suffix,
 )
 from app.scrapers.subtitle_language import (
+    chinese_variant,
     contains_chinese_text,
     expects_chinese,
     filename_language_score,
+    preferred_variant,
 )
 
 _CHINESE_TEXT = "这是中文字幕正文，用于确认下载内容确实包含足够多的中文，而不是仅相信供应商语言标签。"
@@ -100,7 +102,11 @@ def test_subtitle_extension(filename: str, expected: str) -> None:
 def test_provider_language_mapping_keeps_legacy_chinese_compatible() -> None:
     assert _opensubtitles_languages(["chi", "zho", "zh"]) == "zh-cn,zh-tw,ze"
     assert _opensubtitles_languages(["zh-cn"]) == "zh-cn"
-    assert _subdl_languages(["chi", "zh-tw", "eng"]) == "ZH,EN"
+    assert _subdl_languages(["chi", "zh-tw", "eng"]) == "ZH-Hans,ZH-Hant,EN"
+    assert _subdl_languages(["zh-cn"]) == "ZH-Hans"
+    assert _subdl_languages(["zh-tw"]) == "ZH-Hant"
+    assert _subdl_languages(["zh-hans"]) == "ZH-Hans"
+    assert _subdl_languages(["zh-hant"]) == "ZH-Hant"
     assert _subtitle_suffix("中英双语") == "zh"
 
 
@@ -132,6 +138,62 @@ def test_filename_language_ranking_respects_chinese_variant_preference() -> None
     )
     assert filename_language_score("movie.english.srt", ["zh-cn"]) < 0
     assert filename_language_score("movie.english.srt", ["en"]) == 0
+
+
+_TRADITIONAL_TEXT = "這是繁體中文字幕正文，用來確認下載內容確實是繁體中文，而不是簡體中文或日文韓文字幕。"
+
+
+def test_chinese_variant_detects_content_variant() -> None:
+    simplified = _CHINESE_TEXT * 2
+    traditional = _TRADITIONAL_TEXT * 2
+    assert chinese_variant(simplified.encode()) == "simplified"
+    assert chinese_variant(simplified.encode("gb18030")) == "simplified"
+    assert chinese_variant(traditional.encode()) == "traditional"
+    assert chinese_variant(traditional.encode("big5")) == "traditional"
+    # Not enough distinguishing characters -> ambiguous
+    assert chinese_variant(_CHINESE_TEXT[:1].encode()) in (None, "simplified")
+
+
+def test_preferred_variant_defaults_to_simplified() -> None:
+    assert preferred_variant(["zh-cn"]) == "simplified"
+    assert preferred_variant(["zh-hans"]) == "simplified"
+    assert preferred_variant(["zh"]) == "simplified"
+    assert preferred_variant(["chi"]) == "simplified"
+    assert preferred_variant(["zh-tw"]) == "traditional"
+    assert preferred_variant(["zh-hant"]) == "traditional"
+    assert preferred_variant(["en"]) is None
+
+
+@pytest.mark.asyncio
+async def test_save_rejects_traditional_subtitle_when_simplified_requested(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    downloader = SubtitleDownloader("", subdl_api_key="subdl-key")
+    _mock_subdl_download(
+        monkeypatch,
+        downloader,
+        _TRADITIONAL_TEXT.encode(),
+    )
+
+    with pytest.raises(SubtitleError, match="繁体中文"):
+        await downloader._save(_result(language="zh-cn"), tmp_path, "video.mkv")
+
+    assert not (tmp_path / "video.zh.srt").exists()
+
+
+@pytest.mark.asyncio
+async def test_save_accepts_simplified_subtitle_when_simplified_requested(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    downloader = SubtitleDownloader("", subdl_api_key="subdl-key")
+    _mock_subdl_download(monkeypatch, downloader, _CHINESE_TEXT.encode())
+
+    returned = await downloader._save(_result(language="zh-cn"), tmp_path, "video.mkv")
+
+    assert returned == tmp_path / "video.zh.srt"
+    assert returned.read_bytes() == _CHINESE_TEXT.encode()
 
 
 @pytest.mark.asyncio
@@ -349,7 +411,7 @@ async def test_download_falls_back_from_opensubtitles_failure_to_subdl(
 
     assert returned == Path("/saved/video.zh.srt")
     os_search.assert_awaited_once()
-    subdl_search.assert_awaited_once_with("Film", 2020, "ZH", None)
+    subdl_search.assert_awaited_once_with("Film", 2020, "ZH-Hans", None)
     save.assert_awaited_once()
 
 

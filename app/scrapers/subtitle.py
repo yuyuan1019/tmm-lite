@@ -15,9 +15,11 @@ from app.scrapers.opensubtitles import DEFAULT_USER_AGENT, OpenSubtitlesScraper,
 from app.scrapers.subdl import SubDLScraper
 from app.scrapers.subtitle_language import (
     chinese_text_score,
+    chinese_variant,
     contains_chinese_text,
     expects_chinese,
     filename_language_score,
+    preferred_variant,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,11 @@ def _subtitle_extension(filename: str) -> str:
     return suffix if suffix in _SUBTITLE_EXTENSIONS else ".srt"
 
 
+def variant_label(variant: str) -> str:
+    """Return a human-readable Chinese label for a detected variant."""
+    return "繁体中文" if variant == "traditional" else "简体中文"
+
+
 def _unique(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
 
@@ -71,12 +78,23 @@ def _opensubtitles_languages(languages: list[str]) -> str:
 
 
 def _subdl_languages(languages: list[str]) -> str:
-    """Translate user/legacy language values to SubDL's upper-case codes."""
+    """Translate user/legacy language values to SubDL's upper-case codes.
+
+    SubDL distinguishes simplified/traditional Chinese via ``ZH-Hans`` /
+    ``ZH-Hant``; emit the requested variant so the provider biases its results
+    accordingly, rather than collapsing every Chinese code to ``ZH``.
+    """
     normalized: list[str] = []
     for raw in languages:
         code = raw.strip().lower().replace("_", "-")
-        if code in {"chi", "zho", "zh", "zh-cn", "zh-tw", "ze"}:
-            normalized.append("ZH")
+        if code in {"chi", "zho", "zh"}:
+            normalized.append("ZH-Hans" if preferred_variant(languages) != "traditional" else "ZH-Hant")
+        elif code in {"zh-cn", "zh-hans"}:
+            normalized.append("ZH-Hans")
+        elif code in {"zh-tw", "zh-hant"}:
+            normalized.append("ZH-Hant")
+        elif code == "ze":
+            normalized.append("ZH-Hans")
         else:
             normalized.append(_ISO_639_2_TO_1.get(code, code).split("-")[0].upper())
     return ",".join(_unique(normalized)[:3])
@@ -102,6 +120,7 @@ def _unpack_subtitle(
     """Return a usable subtitle payload, extracting safe ZIP members in memory."""
     languages = preferred_languages or []
     require_chinese = expects_chinese(languages)
+    pref_variant = preferred_variant(languages)
     stream = BytesIO(data)
     if not is_zipfile(stream):
         return data, filename
@@ -139,8 +158,17 @@ def _unpack_subtitle(
                 scanned_bytes += member.file_size
                 if not payload:
                     continue
-                if not require_chinese or contains_chinese_text(payload):
+                if not require_chinese:
                     return payload, member.filename
+                if not contains_chinese_text(payload):
+                    continue
+                # Prefer the requested simplified/traditional variant of the
+                # *content*, not just the member filename.
+                if pref_variant is not None:
+                    variant = chinese_variant(payload)
+                    if variant is not None and variant != pref_variant:
+                        continue
+                return payload, member.filename
             if require_chinese:
                 raise SubtitleError("字幕压缩包中没有检测到中文正文")
             raise SubtitleError("字幕压缩包中的字幕文件为空")
@@ -360,6 +388,17 @@ class SubtitleDownloader:
             raise SubtitleError(
                 f"{result.provider} 返回的字幕实际不含中文，已拒绝保存并尝试下一个字幕源"
             )
+        # Verify the *content* matches the requested simplified/traditional
+        # variant — a traditional-Chinese subtitle labelled as Chinese would
+        # otherwise pass the language check above.
+        pref_variant = preferred_variant(self._languages)
+        if expects_chinese(self._languages) and pref_variant is not None:
+            variant = chinese_variant(data)
+            if variant is not None and variant != pref_variant:
+                raise SubtitleError(
+                    f"{result.provider} 返回的字幕为{variant_label(variant)}，"
+                    f"不符合要求的{variant_label(pref_variant)}，已拒绝保存并尝试下一个字幕源"
+                )
 
         logger.debug(
             "Subtitle language verified: provider=%s, filename=%s, chinese_score=%d",
