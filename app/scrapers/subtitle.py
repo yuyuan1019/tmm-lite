@@ -260,6 +260,34 @@ class SubtitleDownloader:
         if self._on_progress is not None:
             self._on_progress(f"  {message}")
 
+    async def _try_candidates(
+        self,
+        label: str,
+        candidates: list[SubtitleResult],
+        media_folder: Path,
+        video_filename: str | None,
+        connection: Connection | None,
+    ) -> Path | None:
+        """Try each candidate of one provider in order.
+
+        A candidate rejected by the save-time content check (e.g. traditional
+        Chinese when simplified was requested) is skipped and the next
+        candidate of the same provider is tried — the provider is only
+        abandoned once *every* candidate failed, instead of giving up after
+        the first one.
+        """
+        if not candidates:
+            self._emit(f"{label} 未找到匹配")
+            return None
+        for result in candidates:
+            self._emit(f"{label} 命中候选: {result.filename}")
+            try:
+                return await self._save(result, media_folder, video_filename, connection)
+            except SubtitleError as exc:
+                self._emit(f"{label} 候选被拒: {exc}")
+                logger.info("%s candidate rejected: %s", label, exc)
+        return None
+
     async def download(
         self,
         title: str,
@@ -286,12 +314,15 @@ class SubtitleDownloader:
             attempted += 1
             self._emit("尝试字幕源 ASSRT")
             try:
-                result = await self._search_assrt(title, year, assrt_languages)
-                if result is not None:
-                    self._emit(f"ASSRT 命中候选: {result.filename}")
-                    return await self._save(result, media_folder, video_filename, connection)
-                self._emit("ASSRT 未找到匹配")
-                logger.info("ASSRT: 无结果 %s (%s)", title, year)
+                candidates = await self._search_assrt(title, year, assrt_languages)
+                saved = await self._try_candidates(
+                    "ASSRT", candidates, media_folder, video_filename, connection,
+                )
+                if saved is not None:
+                    return saved
+                if candidates:
+                    failures.append("ASSRT: 所有候选均不符合要求")
+                    self._emit("ASSRT 所有候选均不符合要求")
             except TmmError as exc:
                 failures.append(f"ASSRT: {exc}")
                 self._emit(f"ASSRT 失败: {exc}")
@@ -302,14 +333,17 @@ class SubtitleDownloader:
             attempted += 1
             self._emit("尝试字幕源 OpenSubtitles")
             try:
-                result = await self._search_os(
+                candidates = await self._search_os(
                     title, year, opensubtitles_languages, imdb_id, video_filename
                 )
-                if result is not None:
-                    self._emit(f"OpenSubtitles 命中候选: {result.filename}")
-                    return await self._save(result, media_folder, video_filename, connection)
-                self._emit("OpenSubtitles 未找到匹配")
-                logger.info("OpenSubtitles: 无结果 %s (%s, imdb=%s)", title, year, imdb_id)
+                saved = await self._try_candidates(
+                    "OpenSubtitles", candidates, media_folder, video_filename, connection,
+                )
+                if saved is not None:
+                    return saved
+                if candidates:
+                    failures.append("OpenSubtitles: 所有候选均不符合要求")
+                    self._emit("OpenSubtitles 所有候选均不符合要求")
             except TmmError as exc:
                 failures.append(f"OpenSubtitles: {exc}")
                 self._emit(f"OpenSubtitles 失败: {exc}")
@@ -320,12 +354,17 @@ class SubtitleDownloader:
             attempted += 1
             self._emit("尝试字幕源 SubDL")
             try:
-                result = await self._search_subdl(title, year, subdl_languages, imdb_id, video_filename)
-                if result is not None:
-                    self._emit(f"SubDL 命中候选: {result.filename}")
-                    return await self._save(result, media_folder, video_filename, connection)
-                self._emit("SubDL 未找到匹配")
-                logger.info("SubDL: 无结果 %s (%s)", title, year)
+                candidates = await self._search_subdl(
+                    title, year, subdl_languages, imdb_id, video_filename,
+                )
+                saved = await self._try_candidates(
+                    "SubDL", candidates, media_folder, video_filename, connection,
+                )
+                if saved is not None:
+                    return saved
+                if candidates:
+                    failures.append("SubDL: 所有候选均不符合要求")
+                    self._emit("SubDL 所有候选均不符合要求")
             except TmmError as exc:
                 failures.append(f"SubDL: {exc}")
                 self._emit(f"SubDL 失败: {exc}")
@@ -362,7 +401,7 @@ class SubtitleDownloader:
         languages: str,
         imdb_id: str | None,
         video_filename: str | None = None,
-    ) -> SubtitleResult | None:
+    ) -> list[SubtitleResult]:
         if self._os is None:
             self._os = OpenSubtitlesScraper(
                 self._os_key, DEFAULT_USER_AGENT, proxy=self._proxy
@@ -383,15 +422,14 @@ class SubtitleDownloader:
                 -filename_release_similarity(video_filename, r.filename),
             ),
         )
-        return results[0] if results else None
+        return results
 
     async def _search_assrt(
         self, title: str, year: int | None, languages: str,
-    ) -> SubtitleResult | None:
+    ) -> list[SubtitleResult]:
         if self._assrt is None:
             self._assrt = AssrtScraper(self._assrt_token, proxy=self._proxy)
-        results = await self._assrt.search(title, year, languages)
-        return results[0] if results else None
+        return await self._assrt.search(title, year, languages)
 
     async def _search_subdl(
         self,
@@ -400,7 +438,7 @@ class SubtitleDownloader:
         languages: str,
         imdb_id: str | None,
         video_filename: str | None = None,
-    ) -> SubtitleResult | None:
+    ) -> list[SubtitleResult]:
         if self._subdl is None:
             self._subdl = SubDLScraper(self._subdl_api_key, proxy=self._proxy)
         results = await self._subdl.search(title, year, languages, imdb_id)
@@ -416,7 +454,7 @@ class SubtitleDownloader:
                 -filename_release_similarity(video_filename, r.filename),
             ),
         )
-        return results[0] if results else None
+        return results
 
     async def _save(
         self,

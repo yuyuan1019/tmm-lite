@@ -345,7 +345,7 @@ async def test_download_uses_assrt_result_first(monkeypatch: pytest.MonkeyPatch)
     downloader = SubtitleDownloader("os-key", assrt_token="assrt-token")
     result = _result("assrt")
     saved = Path("/saved/video.zh.srt")
-    assrt_search = AsyncMock(return_value=result)
+    assrt_search = AsyncMock(return_value=[result])
     os_search = AsyncMock()
     subdl_search = AsyncMock()
     save = AsyncMock(return_value=saved)
@@ -375,7 +375,7 @@ async def test_download_reports_provider_steps_via_progress_callback(
     )
     assrt_result = _result("assrt", filename="movie.简体.chs.srt")
     save = AsyncMock(return_value=Path("/saved/video.zh.srt"))
-    monkeypatch.setattr(downloader, "_search_assrt", AsyncMock(return_value=assrt_result))
+    monkeypatch.setattr(downloader, "_search_assrt", AsyncMock(return_value=[assrt_result]))
     monkeypatch.setattr(downloader, "_save", save)
 
     await downloader.download("Film", 2020, Path("/media/Film"), "video.mkv")
@@ -385,6 +385,33 @@ async def test_download_reports_provider_steps_via_progress_callback(
     assert "ASSRT 命中候选: movie.简体.chs.srt" in joined
     # SubDL was configured but ASSRT succeeded, so it must not be attempted
     assert "SubDL" not in joined
+
+
+@pytest.mark.asyncio
+async def test_download_tries_next_candidate_after_variant_rejection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A traditional candidate is skipped; the next simplified one wins."""
+    downloader = SubtitleDownloader("os-key", assrt_token="assrt-token")
+    trad = _result("assrt", filename="movie.cht.srt")
+    simp = _result("assrt", filename="movie.chs.srt")
+    monkeypatch.setattr(downloader, "_search_assrt", AsyncMock(return_value=[trad, simp]))
+    saves: list[str] = []
+
+    async def fake_save(result, folder, video_filename=None, connection=None):
+        payload = result.filename
+        if "cht" in payload:
+            raise SubtitleError("返回的字幕为繁体中文，不符合要求的简体中文")
+        saves.append(payload)
+        return Path("/saved") / payload
+
+    monkeypatch.setattr(downloader, "_save", fake_save)
+
+    returned = await downloader.download("Film", 2020, tmp_path, "video.mkv")
+
+    assert returned == Path("/saved/movie.chs.srt")
+    assert saves == ["movie.chs.srt"]
 
 
 @pytest.mark.asyncio
@@ -402,7 +429,7 @@ async def test_search_os_prefers_simplified_candidate_by_filename(
 
     picked = await downloader._search_os("Movie", 2020, "zh-cn", None)
 
-    assert picked.filename == "movie.chs.srt"
+    assert [r.filename for r in picked] == ["movie.chs.srt", "movie.cht.srt"]
 
 
 @pytest.mark.asyncio
@@ -420,7 +447,7 @@ async def test_search_subdl_prefers_simplified_candidate_by_filename(
 
     picked = await downloader._search_subdl("Movie", 2020, "ZH-Hans", None)
 
-    assert picked.filename == "movie.简体.srt"
+    assert [r.filename for r in picked] == ["movie.简体.srt", "movie.繁体.ass"]
 
 
 def test_filename_release_similarity_prefers_matching_version() -> None:
@@ -454,7 +481,10 @@ async def test_search_subdl_prefers_matching_release_version(
         "Movie", 2020, "ZH-Hans", None, "Movie.2020.2160p.BluRay.MTeam.mkv"
     )
 
-    assert picked.filename == "Movie.2020.2160p.BluRay.MTeam.chs.srt"
+    assert [r.filename for r in picked] == [
+        "Movie.2020.2160p.BluRay.MTeam.chs.srt",
+        "Movie.2020.1080p.WEBRip.PSA.chs.srt",
+    ]
 
 
 @pytest.mark.asyncio
@@ -464,7 +494,7 @@ async def test_download_falls_back_from_assrt_failure_to_opensubtitles(
     downloader = SubtitleDownloader("os-key", assrt_token="assrt-token")
     result = _result("opensubtitles")
     assrt_search = AsyncMock(side_effect=SubtitleError("ASSRT unavailable"))
-    os_search = AsyncMock(return_value=result)
+    os_search = AsyncMock(return_value=[result])
     subdl_search = AsyncMock()
     save = AsyncMock(return_value=Path("/saved/video.zh.srt"))
     monkeypatch.setattr(downloader, "_search_assrt", assrt_search)
@@ -489,8 +519,8 @@ async def test_download_falls_back_when_assrt_payload_is_not_chinese(
     downloader = SubtitleDownloader("os-key", assrt_token="assrt-token")
     assrt_result = _result("assrt", filename="multi-language.srt")
     os_result = _result("opensubtitles", filename="chinese.srt")
-    monkeypatch.setattr(downloader, "_search_assrt", AsyncMock(return_value=assrt_result))
-    monkeypatch.setattr(downloader, "_search_os", AsyncMock(return_value=os_result))
+    monkeypatch.setattr(downloader, "_search_assrt", AsyncMock(return_value=[assrt_result]))
+    monkeypatch.setattr(downloader, "_search_os", AsyncMock(return_value=[os_result]))
     assrt = AsyncMock()
     assrt.download.return_value = b"1\n00:00:01,000 --> 00:00:02,000\nEnglish only\n"
     opensubtitles = AsyncMock()
@@ -513,7 +543,7 @@ async def test_download_falls_back_from_opensubtitles_failure_to_subdl(
     downloader = SubtitleDownloader("os-key", subdl_api_key="subdl-key")
     result = _result("subdl")
     os_search = AsyncMock(side_effect=SubtitleError("OpenSubtitles unavailable"))
-    subdl_search = AsyncMock(return_value=result)
+    subdl_search = AsyncMock(return_value=[result])
     save = AsyncMock(return_value=Path("/saved/video.zh.srt"))
     monkeypatch.setattr(downloader, "_search_os", os_search)
     monkeypatch.setattr(downloader, "_search_subdl", subdl_search)
