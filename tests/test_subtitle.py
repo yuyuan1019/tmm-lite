@@ -423,6 +423,40 @@ async def test_search_subdl_prefers_simplified_candidate_by_filename(
     assert picked.filename == "movie.简体.srt"
 
 
+def test_filename_release_similarity_prefers_matching_version() -> None:
+    from app.scrapers.subtitle import filename_release_similarity
+
+    video = "Movie (2020) UHD BluRay 2160p HEVC Atmos TrueHD7.1-MTeam.mkv"
+    wrong = "Movie (2020) iNTERNAL 1080p WEBRip x265 HEVC-PSA-chs-en.srt"
+    right = "Movie.2020.2160p.UHD.BluRay.HEVC.Atmos.TrueHD.7.1-MTeam.chs-en.srt"
+    # Same release family scores far higher than a different source/res.
+    assert filename_release_similarity(video, right) > 0.5
+    assert filename_release_similarity(video, wrong) < 0.5
+    # No recognizable features on either side -> neutral.
+    assert filename_release_similarity(video, "Movie (2020).srt") == 0.0
+    assert filename_release_similarity(None, right) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_search_subdl_prefers_matching_release_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SubDL picks the candidate whose release matches the video file."""
+    downloader = SubtitleDownloader("", subdl_api_key="subdl-key")
+    subdl = AsyncMock()
+    subdl.search.return_value = [
+        _result("subdl", filename="Movie.2020.1080p.WEBRip.PSA.chs.srt"),
+        _result("subdl", filename="Movie.2020.2160p.BluRay.MTeam.chs.srt"),
+    ]
+    monkeypatch.setattr(downloader, "_subdl", subdl)
+
+    picked = await downloader._search_subdl(
+        "Movie", 2020, "ZH-Hans", None, "Movie.2020.2160p.BluRay.MTeam.mkv"
+    )
+
+    assert picked.filename == "Movie.2020.2160p.BluRay.MTeam.chs.srt"
+
+
 @pytest.mark.asyncio
 async def test_download_falls_back_from_assrt_failure_to_opensubtitles(
     monkeypatch: pytest.MonkeyPatch,
@@ -442,7 +476,7 @@ async def test_download_falls_back_from_assrt_failure_to_opensubtitles(
 
     assert returned == Path("/saved/video.zh.srt")
     assrt_search.assert_awaited_once()
-    os_search.assert_awaited_once_with("Film", 2020, "zh-cn", None)
+    os_search.assert_awaited_once_with("Film", 2020, "zh-cn", None, None)
     subdl_search.assert_not_awaited()
     save.assert_awaited_once()
 
@@ -489,7 +523,7 @@ async def test_download_falls_back_from_opensubtitles_failure_to_subdl(
 
     assert returned == Path("/saved/video.zh.srt")
     os_search.assert_awaited_once()
-    subdl_search.assert_awaited_once_with("Film", 2020, "ZH-Hans", None)
+    subdl_search.assert_awaited_once_with("Film", 2020, "ZH-Hans", None, None)
     save.assert_awaited_once()
 
 

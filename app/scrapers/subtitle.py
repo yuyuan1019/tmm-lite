@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import posixpath
+import re
 from collections.abc import Callable
 from io import BytesIO
 from pathlib import Path, PurePosixPath
@@ -76,6 +77,33 @@ def _provider_label(provider: str) -> str:
 
 def _unique(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
+
+
+# Release features that distinguish subtitle versions: resolution, source,
+# codec, audio track and channel layout. Matching these between the video
+# filename and a subtitle candidate means the subtitle's timeline is likely
+# aligned with the video (WEBRip vs BluRay etc. differ in runtime).
+_RELEASE_FEATURES = re.compile(
+    r"(2160p|4k|1080p|720p|480p|bluray|brrip|bdrip|webrip|web-?dl|webdl|"
+    r"hdtv|dvdrip|remux|uhd|x265|hevc|x264|h264|avc|av1|10bit|hdr|atmos|"
+    r"truehd|dts|aac|ac3|eac3|flac|opus|2ch|5\.1|7\.1)"
+)
+
+
+def filename_release_similarity(video_filename: str | None, subtitle_filename: str) -> float:
+    """Return how closely a subtitle candidate matches the video's release.
+
+    Compares resolution/source/codec/audio features extracted from both
+    filenames. ``0.0`` when either name carries no recognizable features.
+    """
+    if not video_filename:
+        return 0.0
+    video_features = set(_RELEASE_FEATURES.findall(video_filename.lower()))
+    subtitle_features = set(_RELEASE_FEATURES.findall(subtitle_filename.lower()))
+    if not video_features or not subtitle_features:
+        return 0.0
+    shared = len(video_features & subtitle_features)
+    return shared / max(len(video_features), len(subtitle_features))
 
 
 def _opensubtitles_languages(languages: list[str]) -> str:
@@ -275,7 +303,7 @@ class SubtitleDownloader:
             self._emit("尝试字幕源 OpenSubtitles")
             try:
                 result = await self._search_os(
-                    title, year, opensubtitles_languages, imdb_id
+                    title, year, opensubtitles_languages, imdb_id, video_filename
                 )
                 if result is not None:
                     self._emit(f"OpenSubtitles 命中候选: {result.filename}")
@@ -292,7 +320,7 @@ class SubtitleDownloader:
             attempted += 1
             self._emit("尝试字幕源 SubDL")
             try:
-                result = await self._search_subdl(title, year, subdl_languages, imdb_id)
+                result = await self._search_subdl(title, year, subdl_languages, imdb_id, video_filename)
                 if result is not None:
                     self._emit(f"SubDL 命中候选: {result.filename}")
                     return await self._save(result, media_folder, video_filename, connection)
@@ -328,7 +356,12 @@ class SubtitleDownloader:
     # ------------------------------------------------------------------
 
     async def _search_os(
-        self, title: str, year: int | None, languages: str, imdb_id: str | None,
+        self,
+        title: str,
+        year: int | None,
+        languages: str,
+        imdb_id: str | None,
+        video_filename: str | None = None,
     ) -> SubtitleResult | None:
         if self._os is None:
             self._os = OpenSubtitlesScraper(
@@ -339,13 +372,15 @@ class SubtitleDownloader:
             results = await self._os.search(title, year, languages, None)
         # Prefer non-HI (hearing impaired) results, then the requested
         # simplified/traditional variant as indicated by the candidate
-        # filename — avoids downloading a wrong-variant file only to reject
-        # it after the content check.
+        # filename, then release-version similarity with the video — avoids
+        # downloading a wrong-variant or wrong-version file only to reject
+        # it after the content check (or end up out of sync).
         results = sorted(
             results,
             key=lambda r: (
                 1 if r.hearing_impaired else 0,
                 -filename_language_score(r.filename, self._languages),
+                -filename_release_similarity(video_filename, r.filename),
             ),
         )
         return results[0] if results else None
@@ -364,6 +399,7 @@ class SubtitleDownloader:
         year: int | None,
         languages: str,
         imdb_id: str | None,
+        video_filename: str | None = None,
     ) -> SubtitleResult | None:
         if self._subdl is None:
             self._subdl = SubDLScraper(self._subdl_api_key, proxy=self._proxy)
@@ -371,11 +407,14 @@ class SubtitleDownloader:
         if not results and imdb_id:
             results = await self._subdl.search(title, year, languages, None)
         # Prefer the requested simplified/traditional variant (SubDL unpacks
-        # multi-language bundles into per-variant candidates) so a wrong-variant
-        # file is not downloaded only to be rejected by the content check.
+        # multi-language bundles into per-variant candidates), then release
+        # similarity with the video so the downloaded subtitle is in sync.
         results = sorted(
             results,
-            key=lambda r: -filename_language_score(r.filename, self._languages),
+            key=lambda r: (
+                -filename_language_score(r.filename, self._languages),
+                -filename_release_similarity(video_filename, r.filename),
+            ),
         )
         return results[0] if results else None
 
