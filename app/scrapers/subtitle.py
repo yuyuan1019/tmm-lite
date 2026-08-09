@@ -262,25 +262,23 @@ class SubtitleDownloader:
 
     async def _try_candidates(
         self,
-        label: str,
-        candidates: list[SubtitleResult],
+        ranked: list[tuple[str, SubtitleResult]],
         media_folder: Path,
         video_filename: str | None,
         connection: Connection | None,
     ) -> Path | None:
-        """Try each candidate of one provider in order.
+        """Try globally-ranked (provider, result) candidates in order.
 
         A candidate rejected by the save-time content check (e.g. traditional
-        Chinese when simplified was requested) is skipped and the next
-        candidate of the same provider is tried — the provider is only
-        abandoned once *every* candidate failed, instead of giving up after
-        the first one.
+        Chinese when simplified was requested) is skipped and the next ranked
+        candidate — possibly from a different provider — is tried, so the
+        downloader never settles for the first usable hit when a better
+        version match exists elsewhere.
         """
-        if not candidates:
-            self._emit(f"{label} 未找到匹配")
+        if not ranked:
             return None
-        for result in candidates:
-            self._emit(f"{label} 命中候选: {result.filename}")
+        for label, result in ranked:
+            self._emit(f"{label} 尝试候选: {result.filename}")
             try:
                 return await self._save(result, media_folder, video_filename, connection)
             except SubtitleError as exc:
@@ -299,6 +297,12 @@ class SubtitleDownloader:
     ) -> Path | None:
         """Download the best-matching subtitle to *media_folder*.
 
+        Collects candidates from every configured provider first, then ranks
+        them across providers (language variant, then release-version match
+        with the video, then provider preference) and tries them in order —
+        so a simplified 2160p BluRay subtitle from OpenSubtitles wins over a
+        simplified 1080p WEBRip one from ASSRT.
+
         Returns the local path to the downloaded file, or ``None``.
         When *connection* is provided, the subtitle is written through it
         instead of to the local filesystem.
@@ -306,78 +310,79 @@ class SubtitleDownloader:
         assrt_languages = ",".join(self._languages[:3])
         opensubtitles_languages = _opensubtitles_languages(self._languages)
         subdl_languages = _subdl_languages(self._languages)
-        attempted = 0
         failures: list[str] = []
+        ranked: list[tuple[str, SubtitleResult]] = []
 
-        # Try ASSRT first (Chinese-focused — best hit rate for zh subtitles)
+        if not (self._assrt_token or self._os_key or self._subdl_api_key):
+            raise SubtitleError("未配置可用字幕源，请填写 ASSRT、OpenSubtitles 或 SubDL 密钥")
+
+        # Collect candidates from every configured provider (best-effort).
         if self._assrt_token:
-            attempted += 1
-            self._emit("尝试字幕源 ASSRT")
+            self._emit("查询字幕源 ASSRT")
             try:
                 candidates = await self._search_assrt(
                     title, year, assrt_languages, video_filename
                 )
-                saved = await self._try_candidates(
-                    "ASSRT", candidates, media_folder, video_filename, connection,
-                )
-                if saved is not None:
-                    return saved
-                if candidates:
-                    failures.append("ASSRT: 所有候选均不符合要求")
-                    self._emit("ASSRT 所有候选均不符合要求")
+                ranked.extend(("ASSRT", r) for r in candidates)
+                self._emit(f"ASSRT 返回 {len(candidates)} 个候选")
             except TmmError as exc:
                 failures.append(f"ASSRT: {exc}")
-                self._emit(f"ASSRT 失败: {exc}")
-                logger.warning("ASSRT failed, trying OpenSubtitles: %s", exc)
+                self._emit(f"ASSRT 查询失败: {exc}")
+                logger.warning("ASSRT query failed: %s", exc)
 
-        # Try OpenSubtitles
         if self._os_key:
-            attempted += 1
-            self._emit("尝试字幕源 OpenSubtitles")
+            self._emit("查询字幕源 OpenSubtitles")
             try:
                 candidates = await self._search_os(
                     title, year, opensubtitles_languages, imdb_id, video_filename
                 )
-                saved = await self._try_candidates(
-                    "OpenSubtitles", candidates, media_folder, video_filename, connection,
-                )
-                if saved is not None:
-                    return saved
-                if candidates:
-                    failures.append("OpenSubtitles: 所有候选均不符合要求")
-                    self._emit("OpenSubtitles 所有候选均不符合要求")
+                ranked.extend(("OpenSubtitles", r) for r in candidates)
+                self._emit(f"OpenSubtitles 返回 {len(candidates)} 个候选")
             except TmmError as exc:
                 failures.append(f"OpenSubtitles: {exc}")
-                self._emit(f"OpenSubtitles 失败: {exc}")
-                logger.warning("OpenSubtitles failed, trying SubDL: %s", exc)
+                self._emit(f"OpenSubtitles 查询失败: {exc}")
+                logger.warning("OpenSubtitles query failed: %s", exc)
 
-        # Fallback to SubDL
         if self._subdl_api_key:
-            attempted += 1
-            self._emit("尝试字幕源 SubDL")
+            self._emit("查询字幕源 SubDL")
             try:
                 candidates = await self._search_subdl(
                     title, year, subdl_languages, imdb_id, video_filename,
                 )
-                saved = await self._try_candidates(
-                    "SubDL", candidates, media_folder, video_filename, connection,
-                )
-                if saved is not None:
-                    return saved
-                if candidates:
-                    failures.append("SubDL: 所有候选均不符合要求")
-                    self._emit("SubDL 所有候选均不符合要求")
+                ranked.extend(("SubDL", r) for r in candidates)
+                self._emit(f"SubDL 返回 {len(candidates)} 个候选")
             except TmmError as exc:
                 failures.append(f"SubDL: {exc}")
-                self._emit(f"SubDL 失败: {exc}")
-                logger.warning("SubDL failed, no subtitles downloaded: %s", exc)
+                self._emit(f"SubDL 查询失败: {exc}")
+                logger.warning("SubDL query failed: %s", exc)
 
-        if attempted == 0:
-            raise SubtitleError("未配置可用字幕源，请填写 ASSRT、OpenSubtitles 或 SubDL 密钥")
+        if not ranked:
+            if failures:
+                raise SubtitleError("字幕源请求失败：" + "；".join(failures))
+            self._emit("所有字幕源均未返回候选")
+            logger.info("未下载到字幕: %s (%s, imdb=%s)", title, year, imdb_id)
+            return None
+
+        # Global ranking: language variant first, then release-version match
+        # with the video, then provider preference (ASSRT > OS > SubDL).
+        provider_order = {"ASSRT": 0, "OpenSubtitles": 1, "SubDL": 2}
+        ranked.sort(
+            key=lambda item: (
+                -filename_language_score(item[1].filename, self._languages),
+                -filename_release_similarity(video_filename, item[1].filename),
+                provider_order.get(item[0], 9),
+            ),
+        )
+
+        saved = await self._try_candidates(
+            ranked, media_folder, video_filename, connection,
+        )
+        if saved is not None:
+            return saved
+
         if failures:
             raise SubtitleError("字幕源请求失败：" + "；".join(failures))
-
-        self._emit("所有字幕源均未返回可用结果")
+        self._emit("所有候选均不符合要求")
         logger.info("未下载到字幕: %s (%s, imdb=%s)", title, year, imdb_id)
         return None
 

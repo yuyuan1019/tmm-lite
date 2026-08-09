@@ -346,8 +346,8 @@ async def test_download_uses_assrt_result_first(monkeypatch: pytest.MonkeyPatch)
     result = _result("assrt")
     saved = Path("/saved/video.zh.srt")
     assrt_search = AsyncMock(return_value=[result])
-    os_search = AsyncMock()
-    subdl_search = AsyncMock()
+    os_search = AsyncMock(return_value=[])
+    subdl_search = AsyncMock(return_value=[])
     save = AsyncMock(return_value=saved)
     monkeypatch.setattr(downloader, "_search_assrt", assrt_search)
     monkeypatch.setattr(downloader, "_search_os", os_search)
@@ -358,8 +358,8 @@ async def test_download_uses_assrt_result_first(monkeypatch: pytest.MonkeyPatch)
 
     assert returned == saved
     assrt_search.assert_awaited_once_with("Film", 2020, "zh-cn", "video.mkv")
-    os_search.assert_not_awaited()
-    subdl_search.assert_not_awaited()
+    os_search.assert_awaited_once()
+    subdl_search.assert_not_awaited()  # SubDL not configured
     save.assert_awaited_once()
 
 
@@ -376,15 +376,16 @@ async def test_download_reports_provider_steps_via_progress_callback(
     assrt_result = _result("assrt", filename="movie.简体.chs.srt")
     save = AsyncMock(return_value=Path("/saved/video.zh.srt"))
     monkeypatch.setattr(downloader, "_search_assrt", AsyncMock(return_value=[assrt_result]))
+    monkeypatch.setattr(downloader, "_search_os", AsyncMock(return_value=[]))
+    monkeypatch.setattr(downloader, "_search_subdl", AsyncMock(return_value=[]))
     monkeypatch.setattr(downloader, "_save", save)
 
     await downloader.download("Film", 2020, Path("/media/Film"), "video.mkv")
 
     joined = "\n".join(messages)
-    assert "尝试字幕源 ASSRT" in joined
-    assert "ASSRT 命中候选: movie.简体.chs.srt" in joined
-    # SubDL was configured but ASSRT succeeded, so it must not be attempted
-    assert "SubDL" not in joined
+    assert "查询字幕源 ASSRT" in joined
+    assert "ASSRT 返回 1 个候选" in joined
+    assert "ASSRT 尝试候选: movie.简体.chs.srt" in joined
 
 
 @pytest.mark.asyncio
@@ -412,6 +413,34 @@ async def test_download_tries_next_candidate_after_variant_rejection(
 
     assert returned == Path("/saved/movie.chs.srt")
     assert saves == ["movie.chs.srt"]
+
+
+@pytest.mark.asyncio
+async def test_download_prefers_matching_version_across_providers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 2160p BluRay simplified candidate from OS beats a 1080p WEBRip from ASSRT."""
+    downloader = SubtitleDownloader("os-key", assrt_token="assrt-token")
+    wrong_version = _result("assrt", filename="Movie.2020.1080p.WEBRip.PSA.chs.srt")
+    right_version = _result("opensubtitles", filename="Movie.2020.2160p.BluRay.MTeam.chs.srt")
+    monkeypatch.setattr(downloader, "_search_assrt", AsyncMock(return_value=[wrong_version]))
+    monkeypatch.setattr(downloader, "_search_os", AsyncMock(return_value=[right_version]))
+    monkeypatch.setattr(downloader, "_search_subdl", AsyncMock(return_value=[]))
+    saves: list[str] = []
+
+    async def fake_save(result, folder, video_filename=None, connection=None):
+        saves.append(result.filename)
+        return Path("/saved") / result.filename
+
+    monkeypatch.setattr(downloader, "_save", fake_save)
+
+    returned = await downloader.download(
+        "Movie", 2020, tmp_path, "Movie.2020.2160p.BluRay.MTeam.mkv"
+    )
+
+    assert returned == Path("/saved/Movie.2020.2160p.BluRay.MTeam.chs.srt")
+    assert saves == ["Movie.2020.2160p.BluRay.MTeam.chs.srt"]
 
 
 @pytest.mark.asyncio
@@ -584,9 +613,9 @@ async def test_download_returns_none_when_all_providers_have_no_result(
     downloader = SubtitleDownloader(
         "os-key", assrt_token="assrt-token", subdl_api_key="subdl-key"
     )
-    assrt_search = AsyncMock(return_value=None)
-    os_search = AsyncMock(return_value=None)
-    subdl_search = AsyncMock(return_value=None)
+    assrt_search = AsyncMock(return_value=[])
+    os_search = AsyncMock(return_value=[])
+    subdl_search = AsyncMock(return_value=[])
     save = AsyncMock()
     monkeypatch.setattr(downloader, "_search_assrt", assrt_search)
     monkeypatch.setattr(downloader, "_search_os", os_search)
