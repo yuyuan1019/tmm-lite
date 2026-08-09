@@ -18,6 +18,15 @@ _TRADITIONAL_TOKEN = re.compile(
 _CHINESE_TOKEN = re.compile(
     r"(?:^|[^a-z0-9])(?:chi|zho|zh)(?:$|[^a-z0-9])"
 )
+# Bilingual markers: "中英/双语" plus codes like chs-en / zh.en / cht-en.
+_BILINGUAL_TOKEN = re.compile(
+    r"(?:^|[^a-z0-9])"
+    r"(?:zh[-_.]?en|en[-_.]?zh|chs[-_.]?en|en[-_.]?chs|"
+    r"cht[-_.]?en|en[-_.]?cht|"
+    r"zh[-_.]?(?:cn|tw|hans|hant)[-_.]?en|en[-_.]?zh[-_.]?(?:cn|tw|hans|hant)|"
+    r"bilingual|dual)"
+    r"(?:$|[^a-z0-9])"
+)
 _NON_CHINESE_TOKEN = re.compile(
     r"(?:^|[^a-z0-9])"
     r"(?:en|eng|english|ja|jpn|japanese|ko|kor|korean|fr|fre|fra|es|spa)"
@@ -172,17 +181,24 @@ def contains_chinese_text(data: bytes) -> bool:
 
 
 def filename_language_score(filename: str, languages: list[str]) -> int:
-    """Rank Chinese subtitle filenames, respecting simplified/traditional preference."""
+    """Rank Chinese subtitle filenames, respecting simplified/traditional preference.
+
+    A bilingual (中英对照) file matching the preferred variant ranks above a
+    plain Chinese file of the same variant — for English movies a dual-language
+    subtitle is usually more useful than Chinese-only.
+    """
     if not expects_chinese(languages):
         return 0
 
     name = filename.lower()
     simplified = any(marker in name for marker in ("简体", "简中", "简体中文", "简"))
     traditional = any(marker in name for marker in ("繁体", "繁中", "繁体中文", "繁"))
-    generic = any(marker in name for marker in ("中文", "中字", "中英", "双语"))
+    generic = any(marker in name for marker in ("中文", "中字", "中英", "双语", "对照"))
+    bilingual = any(marker in name for marker in ("中英", "双语", "对照", "简英", "繁英"))
     simplified = simplified or _SIMPLIFIED_TOKEN.search(name) is not None
     traditional = traditional or _TRADITIONAL_TOKEN.search(name) is not None
     generic = generic or _CHINESE_TOKEN.search(name) is not None
+    bilingual = bilingual or _BILINGUAL_TOKEN.search(name) is not None
 
     first_language = languages[0].strip().lower().replace("_", "-") if languages else "zh-cn"
     prefer_traditional = first_language in {"zh-tw", "zh-hant"}
@@ -191,6 +207,10 @@ def filename_language_score(filename: str, languages: list[str]) -> int:
         score = max(score, 2 if prefer_traditional else 4)
     if traditional:
         score = max(score, 4 if prefer_traditional else 2)
+    if bilingual:
+        # Bilingual matching the preferred variant is the best outcome;
+        # bilingual of the opposite variant is still better than plain generic.
+        score = max(score, 5 if (prefer_traditional == traditional) else 3)
     if generic:
         score = max(score, 3)
     if score == 0 and (

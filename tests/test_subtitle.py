@@ -140,6 +140,24 @@ def test_filename_language_ranking_respects_chinese_variant_preference() -> None
     assert filename_language_score("movie.english.srt", ["en"]) == 0
 
 
+def test_filename_language_ranking_prefers_bilingual_for_english_movies() -> None:
+    # Bilingual (中英对照) matching the preferred variant ranks above
+    # Chinese-only — useful for English movies.
+    assert filename_language_score("movie.中英双语.chs.srt", ["zh-cn"]) > filename_language_score(
+        "movie.简体.chs.srt", ["zh-cn"]
+    )
+    assert filename_language_score("movie.chs-en.srt", ["zh-cn"]) > filename_language_score(
+        "movie.chs.srt", ["zh-cn"]
+    )
+    assert filename_language_score("movie.zh-tw.en.srt", ["zh-tw"]) > filename_language_score(
+        "movie.cht.srt", ["zh-tw"]
+    )
+    # Bilingual of the *opposite* variant is not preferred over the right one.
+    assert filename_language_score("movie.简体.chs.srt", ["zh-cn"]) > filename_language_score(
+        "movie.cht-en.srt", ["zh-cn"]
+    )
+
+
 _TRADITIONAL_TEXT = "這是繁體中文字幕正文，用來確認下載內容確實是繁體中文，而不是簡體中文或日文韓文字幕。"
 
 
@@ -367,6 +385,42 @@ async def test_download_reports_provider_steps_via_progress_callback(
     assert "ASSRT 命中候选: movie.简体.chs.srt" in joined
     # SubDL was configured but ASSRT succeeded, so it must not be attempted
     assert "SubDL" not in joined
+
+
+@pytest.mark.asyncio
+async def test_search_os_prefers_simplified_candidate_by_filename(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenSubtitles picks the simplified-marked file over a traditional one."""
+    downloader = SubtitleDownloader("os-key")
+    os = AsyncMock()
+    os.search.return_value = [
+        _result("opensubtitles", filename="movie.cht.srt"),
+        _result("opensubtitles", filename="movie.chs.srt"),
+    ]
+    monkeypatch.setattr(downloader, "_os", os)
+
+    picked = await downloader._search_os("Movie", 2020, "zh-cn", None)
+
+    assert picked.filename == "movie.chs.srt"
+
+
+@pytest.mark.asyncio
+async def test_search_subdl_prefers_simplified_candidate_by_filename(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SubDL picks the simplified-marked file over a traditional one."""
+    downloader = SubtitleDownloader("", subdl_api_key="subdl-key")
+    subdl = AsyncMock()
+    subdl.search.return_value = [
+        _result("subdl", filename="movie.繁体.ass"),
+        _result("subdl", filename="movie.简体.srt"),
+    ]
+    monkeypatch.setattr(downloader, "_subdl", subdl)
+
+    picked = await downloader._search_subdl("Movie", 2020, "ZH-Hans", None)
+
+    assert picked.filename == "movie.简体.srt"
 
 
 @pytest.mark.asyncio

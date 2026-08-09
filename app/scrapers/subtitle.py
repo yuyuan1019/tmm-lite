@@ -62,6 +62,18 @@ def variant_label(variant: str) -> str:
     return "繁体中文" if variant == "traditional" else "简体中文"
 
 
+_PROVIDER_LABELS = {
+    "assrt": "ASSRT",
+    "opensubtitles": "OpenSubtitles",
+    "subdl": "SubDL",
+}
+
+
+def _provider_label(provider: str) -> str:
+    """Return the display name for a provider key."""
+    return _PROVIDER_LABELS.get(provider, provider)
+
+
 def _unique(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
 
@@ -325,10 +337,17 @@ class SubtitleDownloader:
         results = await self._os.search(title, year, languages, imdb_id)
         if not results and imdb_id:
             results = await self._os.search(title, year, languages, None)
-        # Prefer non-HI (hearing impaired) results
-        for r in results:
-            if not r.hearing_impaired:
-                return r
+        # Prefer non-HI (hearing impaired) results, then the requested
+        # simplified/traditional variant as indicated by the candidate
+        # filename — avoids downloading a wrong-variant file only to reject
+        # it after the content check.
+        results = sorted(
+            results,
+            key=lambda r: (
+                1 if r.hearing_impaired else 0,
+                -filename_language_score(r.filename, self._languages),
+            ),
+        )
         return results[0] if results else None
 
     async def _search_assrt(
@@ -351,6 +370,13 @@ class SubtitleDownloader:
         results = await self._subdl.search(title, year, languages, imdb_id)
         if not results and imdb_id:
             results = await self._subdl.search(title, year, languages, None)
+        # Prefer the requested simplified/traditional variant (SubDL unpacks
+        # multi-language bundles into per-variant candidates) so a wrong-variant
+        # file is not downloaded only to be rejected by the content check.
+        results = sorted(
+            results,
+            key=lambda r: -filename_language_score(r.filename, self._languages),
+        )
         return results[0] if results else None
 
     async def _save(
@@ -408,7 +434,7 @@ class SubtitleDownloader:
         if len(data) > _MAX_SUBTITLE_BYTES:
             raise SubtitleError("字幕文件过大，已拒绝保存")
         if expects_chinese(self._languages) and not contains_chinese_text(data):
-            self._emit(f"{result.provider} 返回的字幕不含中文，跳过")
+            self._emit(f"{_provider_label(result.provider)} 返回的字幕不含中文，跳过")
             raise SubtitleError(
                 f"{result.provider} 返回的字幕实际不含中文，已拒绝保存并尝试下一个字幕源"
             )
@@ -420,7 +446,7 @@ class SubtitleDownloader:
             variant = chinese_variant(data)
             if variant is not None and variant != pref_variant:
                 self._emit(
-                    f"{result.provider} 返回的字幕为{variant_label(variant)}，"
+                    f"{_provider_label(result.provider)} 返回的字幕为{variant_label(variant)}，"
                     f"不符合要求的{variant_label(pref_variant)}，跳过"
                 )
                 raise SubtitleError(
