@@ -314,7 +314,9 @@ class SubtitleDownloader:
             attempted += 1
             self._emit("尝试字幕源 ASSRT")
             try:
-                candidates = await self._search_assrt(title, year, assrt_languages)
+                candidates = await self._search_assrt(
+                    title, year, assrt_languages, video_filename
+                )
                 saved = await self._try_candidates(
                     "ASSRT", candidates, media_folder, video_filename, connection,
                 )
@@ -425,11 +427,27 @@ class SubtitleDownloader:
         return results
 
     async def _search_assrt(
-        self, title: str, year: int | None, languages: str,
+        self,
+        title: str,
+        year: int | None,
+        languages: str,
+        video_filename: str | None = None,
     ) -> list[SubtitleResult]:
         if self._assrt is None:
             self._assrt = AssrtScraper(self._assrt_token, proxy=self._proxy)
-        return await self._assrt.search(title, year, languages)
+        results = await self._assrt.search(title, year, languages)
+        # ASSRT returns candidates sorted by vote score; re-rank by the
+        # simplified/traditional variant hint in the filename and then by
+        # release-version similarity with the video, so a matching-version
+        # subtitle is tried before a wrong-version one (which would be out of
+        # sync even if its language is correct).
+        return sorted(
+            results,
+            key=lambda r: (
+                -filename_language_score(r.filename, self._languages),
+                -filename_release_similarity(video_filename, r.filename),
+            ),
+        )
 
     async def _search_subdl(
         self,

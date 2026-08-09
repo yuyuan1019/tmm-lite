@@ -357,7 +357,7 @@ async def test_download_uses_assrt_result_first(monkeypatch: pytest.MonkeyPatch)
     returned = await downloader.download("Film", 2020, Path("/media/Film"), "video.mkv")
 
     assert returned == saved
-    assrt_search.assert_awaited_once_with("Film", 2020, "zh-cn")
+    assrt_search.assert_awaited_once_with("Film", 2020, "zh-cn", "video.mkv")
     os_search.assert_not_awaited()
     subdl_search.assert_not_awaited()
     save.assert_awaited_once()
@@ -430,6 +430,26 @@ async def test_search_os_prefers_simplified_candidate_by_filename(
     picked = await downloader._search_os("Movie", 2020, "zh-cn", None)
 
     assert [r.filename for r in picked] == ["movie.chs.srt", "movie.cht.srt"]
+
+
+@pytest.mark.asyncio
+async def test_search_assrt_prefers_matching_release_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ASSRT candidates are re-ranked by version match, not vote score."""
+    downloader = SubtitleDownloader("", assrt_token="assrt-token")
+    assrt = AsyncMock()
+    assrt.search.return_value = [
+        _result("assrt", filename="Movie.2020.1080p.WEBRip.PSA.srt"),
+        _result("assrt", filename="Movie.2020.2160p.BluRay.MTeam.chs.srt"),
+    ]
+    monkeypatch.setattr(downloader, "_assrt", assrt)
+
+    picked = await downloader._search_assrt(
+        "Movie", 2020, "zh-cn", "Movie.2020.2160p.BluRay.MTeam.mkv"
+    )
+
+    assert picked[0].filename == "Movie.2020.2160p.BluRay.MTeam.chs.srt"
 
 
 @pytest.mark.asyncio
