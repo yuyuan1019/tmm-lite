@@ -19,6 +19,17 @@ from app.scrapers.subtitle import (
     _subtitle_extension,
     _subtitle_suffix,
 )
+from app.scrapers.subtitle_language import (
+    contains_chinese_text,
+    expects_chinese,
+    filename_language_score,
+)
+
+_CHINESE_TEXT = "这是中文字幕正文，用于确认下载内容确实包含足够多的中文，而不是仅相信供应商语言标签。"
+
+
+def _subtitle_bytes(prefix: str = "") -> bytes:
+    return f"{prefix}\n{_CHINESE_TEXT}\n{_CHINESE_TEXT}".encode()
 
 
 class RecordingConnection(Connection):
@@ -62,10 +73,10 @@ def _result(
 def _mock_subdl_download(
     monkeypatch: pytest.MonkeyPatch,
     downloader: SubtitleDownloader,
-    data: bytes = b"subtitle-data",
+    data: bytes | None = None,
 ) -> AsyncMock:
     subdl = AsyncMock()
-    subdl.download.return_value = data
+    subdl.download.return_value = data if data is not None else _subtitle_bytes()
     monkeypatch.setattr(downloader, "_subdl", subdl)
     return subdl
 
@@ -93,6 +104,36 @@ def test_provider_language_mapping_keeps_legacy_chinese_compatible() -> None:
     assert _subtitle_suffix("中英双语") == "zh"
 
 
+def test_chinese_content_detection_handles_common_encodings_and_rejects_neighbors() -> None:
+    simplified = _CHINESE_TEXT * 2
+    traditional = "這是繁體中文字幕，用來確認內容確實是中文，而不是日文或韓文字幕。" * 2
+    japanese = "これは日本語の字幕です。映画の内容を説明するための文章が続きます。" * 4
+    korean = "이것은 한국어 자막이며 영화 내용을 설명하는 문장이 계속됩니다." * 4
+
+    assert contains_chinese_text(simplified.encode())
+    assert contains_chinese_text(simplified.encode("gb18030"))
+    assert contains_chinese_text(traditional.encode("big5"))
+    assert contains_chinese_text(simplified.encode("utf-16"))
+    assert not contains_chinese_text(japanese.encode())
+    assert not contains_chinese_text(japanese.encode("cp932"))
+    assert not contains_chinese_text(korean.encode())
+    assert not contains_chinese_text(korean.encode("cp949"))
+    assert not contains_chinese_text(b"English subtitle only")
+
+
+def test_filename_language_ranking_respects_chinese_variant_preference() -> None:
+    assert expects_chinese(["zh-cn"])
+    assert not expects_chinese(["en"])
+    assert filename_language_score("movie.简体.chs.srt", ["zh-cn"]) > filename_language_score(
+        "movie.繁体.cht.srt", ["zh-cn"]
+    )
+    assert filename_language_score("movie.繁体.cht.srt", ["zh-tw"]) > filename_language_score(
+        "movie.简体.chs.srt", ["zh-tw"]
+    )
+    assert filename_language_score("movie.english.srt", ["zh-cn"]) < 0
+    assert filename_language_score("movie.english.srt", ["en"]) == 0
+
+
 @pytest.mark.asyncio
 async def test_save_connection_writes_beside_nested_video(
     tmp_path: Path,
@@ -102,7 +143,8 @@ async def test_save_connection_writes_beside_nested_video(
     folder = root / "Film (2020)"
     folder.mkdir(parents=True)
     downloader = SubtitleDownloader("")
-    _mock_subdl_download(monkeypatch, downloader, b"[Script Info]")
+    payload = _subtitle_bytes("[Script Info]")
+    _mock_subdl_download(monkeypatch, downloader, payload)
     result = _result(filename="release.ass")
 
     returned = await downloader._save(
@@ -113,7 +155,7 @@ async def test_save_connection_writes_beside_nested_video(
     )
 
     assert returned == folder / "video.zh.ass"
-    assert returned.read_bytes() == b"[Script Info]"
+    assert returned.read_bytes() == payload
     assert not (root / "video.zh.ass").exists()
 
 
@@ -126,7 +168,8 @@ async def test_save_connection_writes_beside_video_in_child_folder(
     folder = root / "Film"
     (folder / "Disc").mkdir(parents=True)
     downloader = SubtitleDownloader("")
-    _mock_subdl_download(monkeypatch, downloader, b"ssa-data")
+    payload = _subtitle_bytes("[Script Info]")
+    _mock_subdl_download(monkeypatch, downloader, payload)
 
     returned = await downloader._save(
         _result(filename="release.ssa"),
@@ -136,7 +179,7 @@ async def test_save_connection_writes_beside_video_in_child_folder(
     )
 
     assert returned == folder / "Disc" / "video.zh.ssa"
-    assert returned.read_bytes() == b"ssa-data"
+    assert returned.read_bytes() == payload
 
 
 @pytest.mark.asyncio
@@ -147,7 +190,8 @@ async def test_save_connection_handles_loose_video_at_library_root(
     root = tmp_path / "movies"
     root.mkdir()
     downloader = SubtitleDownloader("")
-    _mock_subdl_download(monkeypatch, downloader, b"WEBVTT")
+    payload = _subtitle_bytes("WEBVTT")
+    _mock_subdl_download(monkeypatch, downloader, payload)
 
     returned = await downloader._save(
         _result(filename="release.vtt"),
@@ -157,7 +201,7 @@ async def test_save_connection_handles_loose_video_at_library_root(
     )
 
     assert returned == root / "Loose (2020).zh.vtt"
-    assert returned.read_bytes() == b"WEBVTT"
+    assert returned.read_bytes() == payload
 
 
 @pytest.mark.asyncio
@@ -167,12 +211,13 @@ async def test_save_unknown_extension_defaults_to_srt(
 ) -> None:
     folder = tmp_path / "Film"
     downloader = SubtitleDownloader("")
-    _mock_subdl_download(monkeypatch, downloader, b"srt-data")
+    payload = _subtitle_bytes()
+    _mock_subdl_download(monkeypatch, downloader, payload)
 
     returned = await downloader._save(_result(filename="archive.zip"), folder, "video.mkv")
 
     assert returned == folder / "video.zh.srt"
-    assert returned.read_bytes() == b"srt-data"
+    assert returned.read_bytes() == payload
 
 
 @pytest.mark.asyncio
@@ -180,7 +225,8 @@ async def test_save_remote_connection_receives_root_relative_posix_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     downloader = SubtitleDownloader("")
-    _mock_subdl_download(monkeypatch, downloader, b"ass-data")
+    payload = _subtitle_bytes("[Script Info]")
+    _mock_subdl_download(monkeypatch, downloader, payload)
     connection = RecordingConnection("/media/movies")
 
     returned = await downloader._save(
@@ -191,7 +237,7 @@ async def test_save_remote_connection_receives_root_relative_posix_path(
     )
 
     assert returned.as_posix() == "/media/movies/Film/video.zh.ass"
-    assert connection.writes == [("Film/video.zh.ass", b"ass-data")]
+    assert connection.writes == [("Film/video.zh.ass", payload)]
 
 
 @pytest.mark.asyncio
@@ -259,6 +305,31 @@ async def test_download_falls_back_from_assrt_failure_to_opensubtitles(
     os_search.assert_awaited_once_with("Film", 2020, "zh-cn", None)
     subdl_search.assert_not_awaited()
     save.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_download_falls_back_when_assrt_payload_is_not_chinese(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    downloader = SubtitleDownloader("os-key", assrt_token="assrt-token")
+    assrt_result = _result("assrt", filename="multi-language.srt")
+    os_result = _result("opensubtitles", filename="chinese.srt")
+    monkeypatch.setattr(downloader, "_search_assrt", AsyncMock(return_value=assrt_result))
+    monkeypatch.setattr(downloader, "_search_os", AsyncMock(return_value=os_result))
+    assrt = AsyncMock()
+    assrt.download.return_value = b"1\n00:00:01,000 --> 00:00:02,000\nEnglish only\n"
+    opensubtitles = AsyncMock()
+    opensubtitles.download.return_value = _subtitle_bytes()
+    monkeypatch.setattr(downloader, "_assrt", assrt)
+    monkeypatch.setattr(downloader, "_os", opensubtitles)
+
+    returned = await downloader.download("Film", 2020, tmp_path, "video.mkv")
+
+    assert returned == tmp_path / "video.zh.srt"
+    assert returned.read_bytes() == _subtitle_bytes()
+    assrt.download.assert_awaited_once_with(assrt_result, ["zh-cn"])
+    opensubtitles.download.assert_awaited_once_with(os_result)
 
 
 @pytest.mark.asyncio
@@ -338,20 +409,56 @@ async def test_save_extracts_supported_subtitle_from_zip(
     archive = BytesIO()
     with ZipFile(archive, "w") as zipped:
         zipped.writestr("readme.txt", "ignore")
-        zipped.writestr("release.srt", "srt")
-        zipped.writestr("special.ass", "ass")
+        zipped.writestr("release.简体.chs.srt", _subtitle_bytes())
+        zipped.writestr("release.繁体.cht.ass", _subtitle_bytes("[Script Info]"))
+        zipped.writestr("special.english.ass", "English subtitle only")
 
     downloader = SubtitleDownloader("", subdl_api_key="subdl-key")
     _mock_subdl_download(monkeypatch, downloader, archive.getvalue())
 
     returned = await downloader._save(
-        _result(filename="archive.zip"),
+        _result(language="英 简 繁 法 西 日 韩", filename="archive.zip"),
         tmp_path,
         "video.mkv",
     )
 
-    assert returned == tmp_path / "video.zh.ass"
-    assert returned.read_bytes() == b"ass"
+    assert returned == tmp_path / "video.zh.srt"
+    assert returned.read_bytes() == _subtitle_bytes()
+
+
+@pytest.mark.asyncio
+async def test_save_rejects_mislabeled_english_subtitle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    downloader = SubtitleDownloader("", subdl_api_key="subdl-key")
+    _mock_subdl_download(
+        monkeypatch,
+        downloader,
+        b"1\n00:00:01,000 --> 00:00:02,000\nThis subtitle is English only.\n",
+    )
+
+    with pytest.raises(SubtitleError, match="实际不含中文"):
+        await downloader._save(_result(language="zh-cn"), tmp_path, "video.mkv")
+
+    assert not (tmp_path / "video.zh.srt").exists()
+
+
+@pytest.mark.asyncio
+async def test_save_rejects_japanese_subtitle_in_multilingual_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    japanese = "これは日本語の字幕です。映画の内容を説明するための文章が続きます。" * 4
+    archive = BytesIO()
+    with ZipFile(archive, "w") as zipped:
+        zipped.writestr("movie.jpn.srt", japanese)
+        zipped.writestr("movie.eng.srt", "English subtitle only")
+    downloader = SubtitleDownloader("", subdl_api_key="subdl-key")
+    _mock_subdl_download(monkeypatch, downloader, archive.getvalue())
+
+    with pytest.raises(SubtitleError, match="没有检测到中文正文"):
+        await downloader._save(_result(filename="archive.zip"), tmp_path, "video.mkv")
 
 
 @pytest.mark.asyncio

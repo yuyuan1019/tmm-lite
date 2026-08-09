@@ -11,6 +11,9 @@ from app.scrapers.opensubtitles import SubtitleResult
 _SEARCH_URL = "https://api.assrt.net/v1/sub/search"
 _DETAIL_URL = "https://api.assrt.net/v1/sub/detail"
 _FILE_URL = "http://file0.assrt.net/test/movie.srt"
+_CHINESE_BYTES = (
+    "这是中文字幕正文，用于确认文件内容确实为中文，而不是只依赖文件名称。" * 2
+).encode()
 
 
 @pytest.fixture
@@ -92,7 +95,7 @@ async def test_download_fetches_first_filelist_file(scraper: AssrtScraper) -> No
             ]
         },
     }
-    srt_bytes = b"1\n00:00:01,000 --> 00:00:02,000\nhello\n"
+    srt_bytes = _CHINESE_BYTES
     with respx.mock:
         respx.get(_DETAIL_URL).respond(200, json=detail)
         respx.get(_FILE_URL).respond(200, content=srt_bytes)
@@ -102,6 +105,39 @@ async def test_download_fetches_first_filelist_file(scraper: AssrtScraper) -> No
         data = await scraper.download(result)
 
     assert data == srt_bytes
+
+
+@pytest.mark.asyncio
+async def test_download_skips_english_file_and_uses_chinese_file(
+    scraper: AssrtScraper,
+) -> None:
+    english_url = "http://file0.assrt.net/test/movie-1.srt"
+    chinese_url = "http://file0.assrt.net/test/movie-2.srt"
+    detail = {
+        "status": 0,
+        "sub": {
+            "subs": [
+                {
+                    "id": 602333,
+                    "filelist": [
+                        {"f": "movie-1.srt", "url": english_url},
+                        {"f": "movie-2.srt", "url": chinese_url},
+                    ],
+                }
+            ]
+        },
+    }
+    with respx.mock:
+        respx.get(_DETAIL_URL).respond(200, json=detail)
+        respx.get(english_url).respond(200, content=b"English subtitle only")
+        respx.get(chinese_url).respond(200, content=_CHINESE_BYTES)
+        result = SubtitleResult(
+            provider="assrt", language="chi", filename="movie", download_url="602333"
+        )
+        data = await scraper.download(result, ["zh-cn"])
+
+    assert data == _CHINESE_BYTES
+    assert result.filename == "movie-2.srt"
 
 
 @pytest.mark.asyncio

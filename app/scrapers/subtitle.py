@@ -13,12 +13,19 @@ from app.exceptions import SubtitleError, TmmError
 from app.scrapers.assrt import AssrtScraper
 from app.scrapers.opensubtitles import DEFAULT_USER_AGENT, OpenSubtitlesScraper, SubtitleResult
 from app.scrapers.subdl import SubDLScraper
+from app.scrapers.subtitle_language import (
+    chinese_text_score,
+    contains_chinese_text,
+    expects_chinese,
+    filename_language_score,
+)
 
 logger = logging.getLogger(__name__)
 
 _SUBTITLE_EXTENSIONS = frozenset({".srt", ".ass", ".ssa", ".vtt", ".sub"})
 _MAX_ARCHIVE_ENTRIES = 100
 _MAX_SUBTITLE_BYTES = 10 * 1024 * 1024
+_MAX_ARCHIVE_SCAN_BYTES = 25 * 1024 * 1024
 
 # Legacy ISO 639-2 values are accepted and translated for modern provider APIs.
 _ISO_639_2_TO_1 = {
@@ -87,8 +94,14 @@ def _subtitle_suffix(language: str) -> str:
     return _ISO_639_2_TO_1.get(code, code).split("-")[0] or "zh"
 
 
-def _unpack_subtitle(data: bytes, filename: str) -> tuple[bytes, str]:
+def _unpack_subtitle(
+    data: bytes,
+    filename: str,
+    preferred_languages: list[str] | None = None,
+) -> tuple[bytes, str]:
     """Return a usable subtitle payload, extracting safe ZIP members in memory."""
+    languages = preferred_languages or []
+    require_chinese = expects_chinese(languages)
     stream = BytesIO(data)
     if not is_zipfile(stream):
         return data, filename
@@ -106,21 +119,31 @@ def _unpack_subtitle(data: bytes, filename: str) -> tuple[bytes, str]:
             ]
             if not members:
                 raise SubtitleError("字幕压缩包中没有可用的字幕文件")
-            priority = {".ass": 0, ".ssa": 1, ".srt": 2, ".vtt": 3, ".sub": 4}
-            member = min(
+            extension_priority = {".ass": 0, ".ssa": 1, ".srt": 2, ".vtt": 3, ".sub": 4}
+            ordered_members = sorted(
                 members,
                 key=lambda info: (
-                    priority.get(
+                    -filename_language_score(info.filename, languages),
+                    extension_priority.get(
                         PurePosixPath(info.filename.replace("\\", "/")).suffix.lower(),
                         99,
                     ),
                     info.filename.lower(),
                 ),
             )
-            payload = archive.read(member)
-            if not payload:
-                raise SubtitleError("字幕压缩包中的字幕文件为空")
-            return payload, member.filename
+            scanned_bytes = 0
+            for member in ordered_members:
+                if scanned_bytes and scanned_bytes + member.file_size > _MAX_ARCHIVE_SCAN_BYTES:
+                    continue
+                payload = archive.read(member)
+                scanned_bytes += member.file_size
+                if not payload:
+                    continue
+                if not require_chinese or contains_chinese_text(payload):
+                    return payload, member.filename
+            if require_chinese:
+                raise SubtitleError("字幕压缩包中没有检测到中文正文")
+            raise SubtitleError("字幕压缩包中的字幕文件为空")
     except (BadZipFile, RuntimeError) as exc:
         raise SubtitleError("字幕压缩包损坏或无法读取") from exc
 
@@ -320,7 +343,7 @@ class SubtitleDownloader:
         elif result.provider == "assrt":
             if self._assrt is None:
                 self._assrt = AssrtScraper(self._assrt_token, proxy=self._proxy)
-            data = await self._assrt.download(result)
+            data = await self._assrt.download(result, self._languages)
         elif result.provider == "subdl":
             if self._subdl is None:
                 self._subdl = SubDLScraper(self._subdl_api_key, proxy=self._proxy)
@@ -330,11 +353,25 @@ class SubtitleDownloader:
 
         if not data:
             raise SubtitleError(f"{result.provider} 返回了空字幕文件")
-        data, payload_filename = _unpack_subtitle(data, result.filename)
+        data, payload_filename = _unpack_subtitle(data, result.filename, self._languages)
         if len(data) > _MAX_SUBTITLE_BYTES:
             raise SubtitleError("字幕文件过大，已拒绝保存")
+        if expects_chinese(self._languages) and not contains_chinese_text(data):
+            raise SubtitleError(
+                f"{result.provider} 返回的字幕实际不含中文，已拒绝保存并尝试下一个字幕源"
+            )
 
-        suffix = _subtitle_suffix(result.language or "zh")
+        logger.debug(
+            "Subtitle language verified: provider=%s, filename=%s, chinese_score=%d",
+            result.provider,
+            payload_filename,
+            chinese_text_score(data),
+        )
+
+        # Provider labels such as "英 简 繁 法 西 日 韩" describe a bundle, not
+        # the extracted member. Once Chinese content has been verified, use a
+        # stable local Chinese suffix instead of trusting that bundle label.
+        suffix = "zh" if expects_chinese(self._languages) else _subtitle_suffix(result.language)
         extension = _subtitle_extension(payload_filename)
         dest_path = _normalized_posix_path(dest_folder / f"{stem}.{suffix}{extension}")
         dest = Path(dest_path.as_posix())

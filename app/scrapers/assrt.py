@@ -11,11 +11,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from io import BytesIO
+from zipfile import is_zipfile
 
 import httpx
 
 from app.exceptions import TmmError
 from app.scrapers.opensubtitles import SubtitleResult
+from app.scrapers.subtitle_language import (
+    contains_chinese_text,
+    expects_chinese,
+    filename_language_score,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,12 +100,15 @@ class AssrtScraper:
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:10]
 
-    async def download(self, result: SubtitleResult) -> bytes:
+    async def download(
+        self,
+        result: SubtitleResult,
+        preferred_languages: list[str] | None = None,
+    ) -> bytes:
         """Fetch the subtitle bytes for a search result.
 
-        Resolves the sub id via ``/sub/detail`` and downloads the first file in
-        its ``filelist`` (a signed direct link to a raw ``.srt``/``.ass`` — no
-        archive extraction needed).
+        Resolves the sub id via ``/sub/detail`` and tries Chinese-looking files
+        before other members of a multi-language ``filelist``.
         """
         await self._rate_limit()
         try:
@@ -114,18 +124,40 @@ class AssrtScraper:
 
         subs = (data.get("sub") or {}).get("subs") or []
         filelist = subs[0].get("filelist") or [] if subs else []
-        for f in filelist:
+        languages = preferred_languages or ["zh-cn"]
+        ordered_files = sorted(
+            enumerate(filelist),
+            key=lambda item: (
+                -filename_language_score(str(item[1].get("f") or ""), languages),
+                item[0],
+            ),
+        )
+        for _, f in ordered_files:
             url = f.get("url")
             if not url:
                 continue
             try:
                 r = await self._client.get(str(url))
                 r.raise_for_status()
-                return r.content
+                payload = r.content
+                if not payload:
+                    continue
+                filename = str(f.get("f") or result.filename)
+                if (
+                    expects_chinese(languages)
+                    and not is_zipfile(BytesIO(payload))
+                    and not contains_chinese_text(payload)
+                ):
+                    logger.info("ASSRT skipped non-Chinese file: %s", filename)
+                    continue
+                result.filename = filename
+                return payload
             except Exception as exc:  # noqa: BLE001
                 logger.debug("ASSRT file download failed (%s): %s", f.get("f"), exc)
                 continue
 
+        if expects_chinese(languages) and filelist:
+            raise AssrtError("ASSRT: filelist 中没有检测到中文正文")
         raise AssrtError("ASSRT: no downloadable file in filelist")
 
     async def aclose(self) -> None:
