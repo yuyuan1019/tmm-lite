@@ -1544,17 +1544,23 @@ class ScanRunner:
         await conn.write_bytes(nfo_rel, nfo_bytes)
 
         # Step 7: Subtitle download (best-effort, after NFO).  Prefer the
-        # original (usually English) title + imdb_id — subtitle sites match far
+        # original (usually English) title + imdb_id - subtitle sites match far
         # better on those than on the localized title.
         if self._config.subtitle_enabled and self._subtitle is not None:
+            self._log_progress(f"正在刮削字幕: {target.folder_path}")
             try:
-                await self._download_subtitle_for_target(
+                sub = await self._download_subtitle_for_target(
                     target, conn,
                     title=meta.original_title or meta.title,
                     year=meta.year,
                     imdb_id=meta.imdb_id,
                 )
-            except Exception:
+                if sub is not None:
+                    self._log_progress(f"字幕已下载: {target.folder_path} -> {sub.name}")
+                else:
+                    self._log_progress(f"未找到可用字幕: {target.folder_path}")
+            except Exception as exc:
+                self._log_progress(f"字幕下载失败: {target.folder_path}: {exc}")
                 logger.warning(
                     "Subtitle download failed for %s", target.parsed_title, exc_info=True,
                 )

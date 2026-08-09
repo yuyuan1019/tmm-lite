@@ -1809,6 +1809,31 @@ async def test_auto_subtitle_uses_imdb_and_original_title(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_auto_subtitle_emits_live_progress(tmp_path: Path) -> None:
+    """Auto-scrape subtitle step must surface in the live-progress log."""
+    movies_dir = tmp_path / "movies"
+    d = movies_dir / "Film (2020)"
+    d.mkdir(parents=True)
+    (d / "movie.mkv").write_text("x")
+
+    h = _setup(tmp_path, _make_config(subtitle_enabled=True))
+    runner = h.runner; tmdb = h.tmdb
+    sub = AsyncMock()
+    sub.download.return_value = Path("/fake.srt")
+    sub.aclose = AsyncMock()
+    runner.set_subtitle_downloader(sub)  # type: ignore[arg-type]
+    tmdb.search_and_fetch.return_value = _mock_meta(original_title="Film", imdb_id="tt1")
+    with h.session() as sess:
+        _add_library(sess, "Movies", str(movies_dir), "movie")
+
+    await runner.run_full()
+
+    lines = "\n".join(runner.progress_lines())
+    assert "正在刮削字幕" in lines
+    assert "字幕已下载" in lines
+
+
+@pytest.mark.asyncio
 async def test_manual_subtitle_writes_log(tmp_path: Path) -> None:
     from app.database import ScrapeLog
 
