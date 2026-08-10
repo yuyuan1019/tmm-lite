@@ -11,6 +11,7 @@ import html
 import logging
 import math
 import os
+import shutil
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -1176,6 +1177,7 @@ def create_app(
                             "ext": Path(video_path).suffix.lower(),
                             "size": await conn.file_size(video_path),
                             "filename": Path(video_path).name,
+                            "local": (lib.connection_type or "local") == "local",
                         }
                 except Exception:
                     logger.warning("Player probe failed for item %s", item_id, exc_info=True)
@@ -1289,6 +1291,99 @@ def create_app(
             raise
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # GET /api/transcode/{item_id} - ffmpeg on-the-fly transcoding
+    # ------------------------------------------------------------------
+
+    @app.get("/api/transcode/{item_id}")
+    async def transcode_video(request: Request, item_id: int, start: float = 0.0) -> Any:
+        """Transcode a local video to browser-playable H.264/AAC (fMP4).
+
+        Requires ffmpeg on PATH and a local library (remote files are not
+        directly accessible to ffmpeg). ``?start=seconds`` seeks before
+        transcoding, which is how the player page implements seeking.
+        """
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            return JSONResponse(
+                {"error": "服务器未安装 ffmpeg，无法转码"}, status_code=501,
+            )
+
+        sess = request.app.state.session_factory()
+        try:
+            item = sess.get(MediaItem, item_id)
+            if item is None:
+                return JSONResponse({"error": "item not found"}, status_code=404)
+            lib = sess.get(Library, item.library_id)
+            if lib is None:
+                return JSONResponse({"error": "library not found"}, status_code=404)
+            if (lib.connection_type or "local") != "local":
+                return JSONResponse(
+                    {"error": "远程媒体库暂不支持转码，请使用外部播放器"},
+                    status_code=400,
+                )
+
+            from app.scanner import _find_video_file_async, _relative_folder
+            rel = _relative_folder(item.folder_path, lib.path)
+            if Path(rel).suffix.lower() in VIDEO_EXTENSIONS:
+                video_rel: str | None = rel
+            else:
+                conn = _library_connection(lib, request.app.state.enc_key)
+                try:
+                    video_rel = await _find_video_file_async(conn, rel)
+                    if video_rel is None:
+                        video_rel = await _find_video_deep(conn, rel)
+                finally:
+                    await conn.aclose()
+            if video_rel is None:
+                return JSONResponse({"error": "未找到可播放的视频文件"}, status_code=404)
+            local_path = str(Path(lib.path) / video_rel)
+            if not Path(local_path).is_file():
+                return JSONResponse({"error": "视频文件不可访问"}, status_code=404)
+        finally:
+            sess.close()
+
+        # H.264 + AAC in a fragmented MP4 so the browser can play it
+        # progressively; `-ss` before `-i` is a fast input seek.
+        cmd = [
+            ffmpeg, "-hide_banner", "-loglevel", "error",
+            "-ss", f"{max(start, 0.0):.3f}",
+            "-i", local_path,
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "frag_keyframe+empty_moov",
+            "-f", "mp4",
+            "pipe:1",
+        ]
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        async def _transcode_stream() -> Any:
+            try:
+                assert process.stdout is not None
+                while True:
+                    chunk = await process.stdout.read(65536)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                if process.returncode is None:
+                    process.kill()
+                await process.wait()
+
+        return StreamingResponse(
+            _transcode_stream(),
+            media_type="video/mp4",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Transcode": "ffmpeg",
+            },
+        )
+
     # GET /healthz
     # ------------------------------------------------------------------
 
@@ -1556,6 +1651,11 @@ def _play_page_html(item_id: int, title: str, file_info: dict[str, object] | Non
             pass
 
     browser_ok = ext in (".mp4", ".webm", ".mov")
+    # Server-side ffmpeg transcoding is available for local libraries that
+    # ship incompatible codecs (MKV/HEVC etc.) when ffmpeg is installed.
+    is_local = bool(file_info.get("local")) if file_info else False
+    transcode_ok = is_local and shutil.which("ffmpeg") is not None and not browser_ok
+
     format_label = ext.upper().lstrip(".") if ext else "?"
     safe_format_label = html.escape(format_label, quote=True)
     format_note = ""
@@ -1567,6 +1667,14 @@ def _play_page_html(item_id: int, title: str, file_info: dict[str, object] | Non
         format_note = "TS 流格式，浏览器兼容性差"
     elif ext == ".avi":
         format_note = "AVI 容器较旧，浏览器可能无法播放"
+
+    # Server-side transcoding button: shown only when ffmpeg is available
+    # and the file is not natively playable.
+    transcode_button_html = (
+        '<button class="btn-transcode" onclick="startTranscode()">⚡ 服务端转码播放</button>'
+        if transcode_ok
+        else ""
+    )
 
     file_info_html = ""
     if file_info and file_info.get("found"):
@@ -1600,6 +1708,7 @@ video {{ max-width:100%; max-height:60vh; background:#000; border-radius:4px; }}
 .fallback button {{ margin:6px; padding:10px 20px; border:none; border-radius:6px; cursor:pointer; font-size:14px; }}
 .btn-copy {{ background:#2c3e50; color:#fff; }}
 .btn-pot {{ background:#e67e22; color:#fff; }}
+.btn-transcode {{ background:#27ae60; color:#fff; }}
 .btn-back {{ background:#555; color:#fff; }}
 </style>
 </head>
@@ -1631,6 +1740,7 @@ video {{ max-width:100%; max-height:60vh; background:#000; border-radius:4px; }}
     <code id="streamUrl">{stream_url}</code>
     <button class="btn-copy" onclick="copyStreamUrl()">📋 复制流地址</button>
     <button class="btn-pot" onclick="potPlayer()">🎬 一键复制到 PotPlayer</button>
+    {transcode_button_html}
     <a href="/preview"><button class="btn-back">← 返回影视库</button></a>
     <p style="margin-top:16px;font-size:12px;color:#888;line-height:1.6;">
       <b>PotPlayer 步骤：</b>打开 PotPlayer → 按 Ctrl+U → 粘贴地址 → 确定<br>
@@ -1641,6 +1751,9 @@ video {{ max-width:100%; max-height:60vh; background:#000; border-radius:4px; }}
 </div>
 <script>
 var streamUrl = '{stream_url}';
+var transcodeUrl = '/api/transcode/{item_id}';
+var transcodeSeek = 0;
+var usingTranscode = false;
 var fullUrl = window.location.origin + streamUrl;
 var _probeDone = false;
 var _loadTimer = null;
@@ -1663,6 +1776,30 @@ if (!_browserOk) {{
      .catch(function() {{ showFallback('服务器返回 HTTP ' + r.status); }});
   }}).catch(function(e) {{ showFallback('无法连接: ' + e.message); }});
 }}
+
+function startTranscode() {{
+  usingTranscode = true;
+  var url = transcodeUrl + (transcodeSeek > 0 ? ('?start=' + transcodeSeek) : '');
+  document.getElementById('fallback').style.display = 'none';
+  document.getElementById('loading').style.display = 'flex';
+  document.getElementById('status').textContent = '服务端转码中…';
+  var v = document.getElementById('player');
+  v.src = url;
+  v.style.display = 'block';
+  v.load();
+  v.play().catch(function(){{}});
+}}
+
+// Transcoding is a live stream: seeking re-requests with ?start=SECONDS.
+var _seekTimer = null;
+document.getElementById('player').addEventListener('seeking', function() {{
+  if (!usingTranscode) return;
+  if (_seekTimer) clearTimeout(_seekTimer);
+  _seekTimer = setTimeout(function() {{
+    transcodeSeek = Math.floor(document.getElementById('player').currentTime || 0);
+    startTranscode();
+  }}, 800);
+}});
 
 function startPlayer() {{
   if (_probeDone) return;
